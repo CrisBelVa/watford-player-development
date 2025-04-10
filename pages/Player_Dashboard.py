@@ -689,7 +689,6 @@ elif section == "Player Comparison":
     summary_df_top5 = summary_df_top5.sort_values(by='total_rating', ascending=False).head(5)
 
     if not summary_df_top5.empty:
-        st.markdown("#### 🧽 Top 5 AML Players (Detailed)")
         st.dataframe(summary_df_top5.rename(columns={
             "playerName": "Player",
             "teamName": "Team",
