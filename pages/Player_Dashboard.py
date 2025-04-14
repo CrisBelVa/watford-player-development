@@ -100,7 +100,7 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     event_metrics = calculate_event_metrics(event_data)
 
         # Merge and compute percentages
-    metrics_summary = pd.merge(player_stats, event_metrics, on='matchId', how='left').fillna(0)
+    metrics_summary = pd.merge(event_metrics, player_stats, on='matchId', how='left').fillna(0)
     metrics_summary['pass_completion_pct'] = (metrics_summary['passesAccurate'] / metrics_summary['passesTotal'].replace(0, np.nan)) * 100
     metrics_summary['aerial_duel_pct'] = (metrics_summary['aerialsWon'] / metrics_summary['aerialsTotal'].replace(0, np.nan)) * 100
     metrics_summary['take_on_success_pct'] = (metrics_summary['dribblesWon'] / metrics_summary['dribblesAttempted'].replace(0, np.nan)) * 100
@@ -233,18 +233,17 @@ def add_match_dates(df, match_data_df):
 # Aplicar datas ao metrics_summary
 metrics_summary, min_date, max_date = add_match_dates(metrics_summary, match_data)
 
-# Use full date range by default
-default_start_date = min_date
-default_end_date = max_date
+# 4 Lat games filter
+last_4_games = metrics_summary.sort_values("matchDate").drop_duplicates("matchId").tail(4)
+default_start_date = last_4_games["matchDate"].min().date()
+default_end_date = last_4_games["matchDate"].max().date()
 
-# Filtros no sidebar
 start_date = st.sidebar.date_input("Start date", default_start_date, min_value=min_date, max_value=max_date)
 end_date = st.sidebar.date_input("End date", default_end_date, min_value=min_date, max_value=max_date)
 
 # Aplicar filtro de intervalo de datas
 mask = (metrics_summary["matchDate"].dt.date >= start_date) & (metrics_summary["matchDate"].dt.date <= end_date)
 filtered_df = metrics_summary.loc[mask].sort_values("matchDate")
-
 
 # Define once globally
 metric_keys = [
@@ -690,7 +689,6 @@ elif section == "Player Comparison":
     summary_df_top5 = summary_df_top5.sort_values(by='total_rating', ascending=False).head(5)
 
     if not summary_df_top5.empty:
-        st.markdown("#### 🧽 Top 5 AML Players (Detailed)")
         st.dataframe(summary_df_top5.rename(columns={
             "playerName": "Player",
             "teamName": "Team",
@@ -845,9 +843,10 @@ elif section == "Player Comparison":
                 )
 
                 fig.update_layout(
+                    xaxis_title=None,
+                    yaxis_title=None,
                     showlegend=False,
                     title_x=0.5
                 )
 
                 st.plotly_chart(fig, use_container_width=True)
-
