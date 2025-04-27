@@ -13,6 +13,14 @@ from db_utils import load_player_data
 from db_utils import load_all_data 
 from db_utils import get_player_position
 from db_utils import process_player_metrics
+from db_utils import (
+    get_top5_teams,
+    get_top5_players,
+    get_minutes,
+    calculate_top5_metrics,
+    calculate_logged_player_metrics,
+    plot_kpi_comparison
+)
 from db_utils import prepare_player_data_with_minutes
 from db_utils import calculate_kpis_comparison, get_top5_players_by_position
 from math import ceil
@@ -101,7 +109,12 @@ player_position = get_player_position(player_data, event_data, player_id, player
 
 # Get Metrics
 
-metrics_summary = process_player_metrics(player_stats, event_data, player_id, player_name)
+metrics_summary = process_player_metrics(
+    player_stats=player_stats,
+    event_data=event_data,
+    player_id=player_id,
+    player_name=player_name
+)
 
 
 # Labels for all possible metrics (expanded for v3)
@@ -226,48 +239,7 @@ if not selected_kpis:
     st.error(f"⚠️ No KPIs found for position: {player_position}")
 
 
-# Step 6 – Extract player details
-player_info = player_data[player_data["playerId"] == player_id].iloc[0]
 
-# Extract and organize details
-age = player_info["age"]
-shirt_number = player_info["shirtNo"]
-height = player_info["height"]
-weight = player_info["weight"]
-games_played = metrics_summary.shape[0]
-
-# Labels and values for display
-labels = [
-    "Age", "Shirt Number", "Height", "Weight", "Games Played",
-    "Games as Starter", "Minutes Played"
-]
-values = [
-    age, shirt_number, height, weight, games_played,
-    int(games_as_starter), int(total_minutes)
-]
-
-# Styled Player Info Cards
-with st.container():
-
-    info_cols = st.columns(len(labels))
-    for i, (label, value) in enumerate(zip(labels, values)):
-        with info_cols[i]:
-            st.markdown(
-                f"""
-                <div style="
-                    background-color: #ffe6e6;
-                    padding: 0.6rem;
-                    border-radius: 12px;
-                    text-align: center;
-                    margin-bottom: 1rem;
-                    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-                ">
-                    <div style="font-size: 0.85rem; color: #444; font-weight: 500;">{label}</div>
-                    <div style="font-size: 1.3rem; font-weight: bold; color: #555;">{value}</div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
 
 # SIDE BAR
 st.sidebar.header("Time Filters")
@@ -475,7 +447,76 @@ with logout_container:
         st.session_state.pop("player_name", None)
         st.rerun()
 
+
+# --- Player Info Section (always at top)
+
+# Extract player static details (only once)
+player_info = player_data[player_data["playerId"] == player_id].iloc[0]
+age = player_info["age"]
+shirt_number = player_info["shirtNo"]
+height = player_info["height"]
+weight = player_info["weight"]
+team_name = player_info["teamName"]
+
+# --- Now dynamic stats based on time filter (start_date, end_date)
+
+# 1. Merge player_data with match_data
+filtered_logged_player_info = pd.merge(
+    player_data,
+    match_data[["matchId", "startDate"]],
+    on="matchId",
+    how="left"
+)
+
+filtered_logged_player_info["startDate"] = pd.to_datetime(filtered_logged_player_info["startDate"], errors="coerce")
+
+# 2. Apply player ID and date filter
+filtered_logged_player_info = filtered_logged_player_info[
+    (filtered_logged_player_info["playerId"] == player_id) &
+    (filtered_logged_player_info["startDate"].dt.date >= start_date) &
+    (filtered_logged_player_info["startDate"].dt.date <= end_date)
+]
+
+# 3. Now calculate correctly
+games_played = filtered_logged_player_info.shape[0]
+games_as_starter = filtered_logged_player_info["isFirstEleven"].sum()
+total_minutes = filtered_logged_player_info["minutesPlayed"].sum()
+
+# --- Labels and Values for display
+labels = [
+    "Age", "Shirt Number", "Height", "Weight", "Games Played",
+    "Games as Starter", "Minutes Played"
+]
+values = [
+    age, shirt_number, height, weight,
+    games_played, int(games_as_starter), int(total_minutes)
+]
+
+# --- Styled Player Info Cards (your custom HTML)
+with st.container():
+    info_cols = st.columns(len(labels))
+    for i, (label, value) in enumerate(zip(labels, values)):
+        with info_cols[i]:
+            st.markdown(
+                f"""
+                <div style="
+                    background-color: #ffe6e6;
+                    padding: 0.6rem;
+                    border-radius: 12px;
+                    text-align: center;
+                    margin-bottom: 1rem;
+                    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+                ">
+                    <div style="font-size: 0.85rem; color: #444; font-weight: 500;">{label}</div>
+                    <div style="font-size: 1.3rem; font-weight: bold; color: #555;">{value}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+
 if section == "Overview Stats":
+    
     st.markdown("""
     <div style="
         background-color: #fff9cc;
@@ -766,65 +807,14 @@ elif section == "Trends Stats":
 
 
 elif section == "Player Comparison":
-    st.info("Top 5 Players in the Competition – by Position")
+    st.info(f"Top 5 Players in the Competition – **{player_position}**")
 
-    # --- Step 1: Determine and Display Real Playing Position ---
-    st.markdown("#### 🔍 Step 1: Get Real Player Position")
-
-    # Use already computed player_position from earlier logic
-    st.success(f"✅ Player Detected Position: **{player_position}**")
-
-    # --- Step 2: Filter match_data by selected date range ---
-    st.markdown("#### 🗓️ Step 2: Filter Matches by Date and Get Top Teams")
-
-    match_data["startDate"] = pd.to_datetime(match_data["startDate"], errors="coerce")
-    filtered_matches = match_data[
-        (match_data["startDate"].dt.date >= start_date) &
-        (match_data["startDate"].dt.date <= end_date)
-    ]
-
-    # Extract goals
-    score_split = filtered_matches["score"].str.replace(" ", "", regex=False).str.split(":", expand=True)
-    filtered_matches["home_goals"] = pd.to_numeric(score_split[0], errors="coerce")
-    filtered_matches["away_goals"] = pd.to_numeric(score_split[1], errors="coerce")
-
-    # Merge with team_data
-    team_scores_df = pd.merge(
-        team_data,
-        filtered_matches[["matchId", "home_goals", "away_goals"]],
-        on="matchId", how="inner"
-    )
-
-    # Infer home/away
-    team_scores_df["home_away"] = team_scores_df.apply(
-        lambda row: "home" if row["scores.fulltime"] == row["home_goals"] else "away", axis=1
-    )
-
-    # Assign points
-    def assign_points(row):
-        if row["home_away"] == "home":
-            return 3 if row["home_goals"] > row["away_goals"] else 1 if row["home_goals"] == row["away_goals"] else 0
-        else:
-            return 3 if row["away_goals"] > row["home_goals"] else 1 if row["away_goals"] == row["home_goals"] else 0
-
-    team_scores_df["points"] = team_scores_df.apply(assign_points, axis=1)
-
-    # Group to get top 5 teams
-    team_points = (
-        team_scores_df
-        .groupby(["teamId", "teamName"], as_index=False)["points"]
-        .sum()
-        .sort_values(by="points", ascending=False)
-        .head(5)
-    )
+    # --- Step 1: Top 5 Teams ---
+    team_points = get_top5_teams(match_data, team_data, start_date, end_date)
     top_team_ids = team_points["teamId"].tolist()
+    top5_team_ids_str = ','.join(map(str, top_team_ids))
 
-    st.dataframe(team_points, use_container_width=True)
-
-    # STEP 3 — Filter Top 5 Players Matching Position
-    st.markdown("#### 👤 Step 3: Filter Top 5 Players Matching Position")
-
-    # Define reverse position map for dynamic filtering
+    # --- Step 2: Top 5 Players ---
     reverse_position_map = {
         "Goalkeeper": ["GK"],
         "Center Back": ["DC"],
@@ -832,234 +822,122 @@ elif section == "Player Comparison":
         "Right Back": ["DR", "DMR"],
         "Defensive Midfielder": ["DMC"],
         "Midfielder": ["MC", "ML", "MR"],
-        "Attacking Midfielder": ["AMC", "AML", "FWL", "AMR", "FWR"],
-        "Left Winger": ["AML", "FWL"],
-        "Right Winger": ["AMR", "FWR"],
-        "Striker": ["FW"]
+        "Attacking Midfielder": ["AMC", "AML", "AMR"],
+        "Striker": ["FW", "FWL", "FWR"]
     }
-
-    # Get relevant position codes for filtering
     position_codes = reverse_position_map.get(player_position, [])
-    st.write("📌 Position codes:", position_codes)
 
-    # Load all players from player_stats, player_data, match_data — restricted to top 5 teams and date range
-    top5_team_ids_str = ','.join(map(str, top_team_ids))
-
-    query_top5_players = f"""
-        SELECT ps.* FROM player_stats ps
+    # Get full player stats
+    query_all_players = f"""
+        SELECT ps.*, pd.position, pd.age, pd.shirtNo, pd.height, pd.weight, pd.isFirstEleven,
+               pd.subbedInExpandedMinute, pd.subbedOutExpandedMinute
+        FROM player_stats ps
         JOIN player_data pd ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
         JOIN match_data md ON ps.matchId = md.matchId
         WHERE pd.position IN ({','.join([f"'{pos}'" for pos in position_codes])})
         AND ps.teamId IN ({top5_team_ids_str})
         AND md.startDate BETWEEN '{start_date}' AND '{end_date}'
     """
-    all_player_stats = pd.read_sql(query_top5_players, connect_to_db())
-
-    query_player_info = f"""
-        SELECT * FROM player_data
-        WHERE playerId IN (
-            SELECT DISTINCT playerId FROM player_stats
-            WHERE teamId IN ({top5_team_ids_str})
-        )
-    """
-    player_info_df = pd.read_sql(query_player_info, connect_to_db())
-
-    # Merge everything
-    players_full = pd.merge(
-        all_player_stats,
-        player_info_df[['playerId', 'matchId', 'position', 'age', 'shirtNo', 'height', 'weight', 'isFirstEleven', 'subbedInExpandedMinute', 'subbedOutExpandedMinute']],
-        on=['playerId', 'matchId'],
-        how='left'
-    )
-    players_full = pd.merge(players_full, match_data[['matchId', 'startDate']], on='matchId', how='left')
-
-    # Clean and prepare
-    players_full['startDate'] = pd.to_datetime(players_full['startDate'])
-    players_full['ratings_clean'] = pd.to_numeric(players_full['ratings'].astype(str).str.replace(",", "."), errors='coerce')
-    players_full = players_full.drop_duplicates(subset=["playerId", "matchId"])
-
-    # DEBUG
-    st.write("🎯 Filtered players shape:", players_full.shape)
-    st.write("🏆 Top team IDs:", top_team_ids)
+    players_full = pd.read_sql(query_all_players, connect_to_db())
 
     if players_full.empty:
-        st.error(f"🚨 No top 5 players found for position: {player_position}")
-    else:
-        st.success(f"✅ Found {players_full['playerId'].nunique()} players for: {player_position}")
+        st.error(f"🚨 No players found for {player_position}.")
+        st.stop()
 
+    # Clean player stats
+    players_full['ratings_clean'] = pd.to_numeric(players_full['ratings'].astype(str).str.replace(",", "."), errors='coerce')
+    players_full['subbedInExpandedMinute'] = pd.to_numeric(players_full['subbedInExpandedMinute'].astype(str).str.replace(",", "."), errors='coerce')
+    players_full['subbedOutExpandedMinute'] = pd.to_numeric(players_full['subbedOutExpandedMinute'].astype(str).str.replace(",", "."), errors='coerce')
 
-     # --- Step 4: Aggregate and Rank Top 5 Players by Total Rating ---
-    st.markdown("#### 🧮 Step 4: Aggregate and Rank Top 5 Players")
+    # Calculate minutes played
+    players_full['minutesPlayed'] = players_full.apply(lambda row: get_minutes(row), axis=1)
 
-    # Convert subbedIn/out to numeric
-    players_full['subbedInExpandedMinute'] = players_full['subbedInExpandedMinute'].astype(str).str.replace(",", ".").replace("None", pd.NA)
-    players_full['subbedOutExpandedMinute'] = players_full['subbedOutExpandedMinute'].astype(str).str.replace(",", ".").replace("None", pd.NA)
-    players_full['subbedInExpandedMinute'] = pd.to_numeric(players_full['subbedInExpandedMinute'], errors='coerce')
-    players_full['subbedOutExpandedMinute'] = pd.to_numeric(players_full['subbedOutExpandedMinute'], errors='coerce')
-
-    def get_minutes(row):
-        if row['isFirstEleven'] == 1:
-            return row['subbedOutExpandedMinute'] if pd.notna(row['subbedOutExpandedMinute']) else 90.0
-        elif pd.notna(row['subbedInExpandedMinute']):
-            return row['subbedOutExpandedMinute'] - row['subbedInExpandedMinute'] if pd.notna(row['subbedOutExpandedMinute']) else 90.0 - row['subbedInExpandedMinute']
-        else:
-            return 0.0
-
-    players_full['minutesPlayed'] = players_full.apply(get_minutes, axis=1)
-
-    # Group by player
-    summary_df_top5 = (
-        players_full.groupby(["playerId", "playerName"], as_index=False)
-        .agg(
-            teamId=("teamId", "first"),
-            age=("age", "first"),
-            shirtNo=("shirtNo", "first"),
-            height=("height", "first"),
-            weight=("weight", "first"),
-            matches_played=("matchId", "nunique"),
-            games_as_starter=("isFirstEleven", "sum"),
-            total_minutes=("minutesPlayed", "sum"),
-            total_rating=("ratings_clean", "sum")
-        )
+    # Build summary_df_top5
+    summary_df_top5 = get_top5_players(
+        all_player_stats=players_full,
+        player_info_df=players_full,
+        match_data=match_data,
+        team_data=team_data,
+        position_codes=position_codes,
+        top_team_ids=top_team_ids,
+        start_date=start_date,
+        end_date=end_date
     )
 
-
-    # Merge with team names
-    summary_df_top5 = pd.merge(summary_df_top5, team_data[['teamId', 'teamName']], on='teamId', how='left')
-
-    # Sort by total rating and select top 5
-    summary_df_top5 = (
-        summary_df_top5
-        .sort_values(by='total_rating', ascending=False)
-        .drop_duplicates(subset='playerId', keep='first')
-        .head(5)
-    )
-
-
-    # ✅ Output
-    st.write("🏅 Top 5 Players by Total Rating:")
-    st.dataframe(summary_df_top5, use_container_width=True)
-
-    # --- Step 5: Calculate KPIs for Top 5 Players ---
-    st.markdown("#### 📊 Step 5: Calculate KPIs for Top 5 Players")
-
-    # Use the same source used to generate summary_df_top5
     top5_player_ids = summary_df_top5["playerId"].tolist()
 
-    # Filter event_data for these players
-    # Match on playerId AND matchId to ensure proper join
-    relevant_ids = all_player_stats[["playerId", "matchId"]].drop_duplicates()
+    # Filter again player stats
+    player_stats_top5 = players_full[players_full["playerId"].isin(top5_player_ids)].copy()
 
-    # Ensure same types
-    event_data["playerId"] = event_data["playerId"].astype(int)
-    event_data["matchId"] = event_data["matchId"].astype(str)
-    relevant_ids["playerId"] = relevant_ids["playerId"].astype(int)
-    relevant_ids["matchId"] = relevant_ids["matchId"].astype(str)
+    # --- Step 3: Event Data for Top 5 ---
+    query_top5_events = f"""
+        SELECT e.* FROM event_data e
+        JOIN match_data m ON e.matchId = m.matchId
+        WHERE e.playerId IN ({','.join(map(str, top5_player_ids))})
+        AND m.startDate BETWEEN '{start_date}' AND '{end_date}'
+    """
+    event_data_top5 = pd.read_sql(query_top5_events, connect_to_db())
 
-    # Merge on both keys
-    event_data_top5 = pd.merge(
-        event_data,
-        relevant_ids,
-        on=["playerId", "matchId"],
-        how="inner"
-    ).copy()
-    
-    player_stats_top5 = all_player_stats[all_player_stats["playerId"].isin(top5_player_ids)].copy()
-
-    # 3. Clean player_stats columns
-    metric_cols = player_stats_top5.columns.drop(['playerId', 'playerName', 'matchId', 'field', 'teamId', 'teamName'], errors='ignore')
-    for col in metric_cols:
-        player_stats_top5[col] = player_stats_top5[col].astype(str).str.replace(',', '.', regex=False)
-        player_stats_top5[col] = pd.to_numeric(player_stats_top5[col], errors='coerce')
-
-    # 4. Clean event_data columns
-    event_data_top5['playerName'] = event_data_top5['playerName'].astype(str).str.lower()
+    # Clean event_data
     for col in ['x', 'y', 'value_PassEndX', 'value_PassEndY', 'endX', 'endY', 'value_Length', 'xG', 'xA', 'ps_xG']:
         if col in event_data_top5.columns:
             event_data_top5[col] = event_data_top5[col].astype(str).str.replace(',', '.', regex=False)
             event_data_top5[col] = pd.to_numeric(event_data_top5[col], errors='coerce')
 
-    # 5. Compute event-level metrics
-    def calculate_event_metrics(df):
-        df = df.copy()
-        passes_into_penalty_area = df[(df['value_PassEndX'] >= 94) & (df['value_PassEndY'].between(21, 79))].groupby(['playerId', 'matchId']).size().rename("passes_into_penalty_area")
-        carries_into_final_third = df[(df['x'] < 66.7) & (df['endX'] >= 66.7)].groupby(['playerId', 'matchId']).size().rename("carries_into_final_third")
-        carries_into_penalty_area = df[(df['endX'] >= 94) & (df['endY'].between(21, 79))].groupby(['playerId', 'matchId']).size().rename("carries_into_penalty_area")
-        goals = df[df['type_displayName'] == 'Goal'].groupby(['playerId', 'matchId']).size().rename("goals")
-        assists = df[df['value_IntentionalAssist'] == 1].groupby(['playerId', 'matchId']).size().rename("assists")
-        crosses = df[df['value_Cross'] == 1].groupby(['playerId', 'matchId']).size().rename("crosses")
-        long_passes = df[df['value_Length'] >= 30]
-        long_passes_total = long_passes.groupby(['playerId', 'matchId']).size().rename("long_passes_total")
-        long_passes_success = long_passes[long_passes['outcomeType_displayName'] == 'Successful'].groupby(['playerId', 'matchId']).size().rename("long_passes_success")
-        long_pass_pct = (long_passes_success / long_passes_total.replace(0, np.nan) * 100).rename("long_pass_pct")
-        progressive_pass_distance = df[(df['type_displayName'] == 'Pass') & (df['value_Length'] > 10)].groupby(['playerId', 'matchId'])['value_Length'].sum().rename("progressive_pass_distance")
-        progressive_carry_distance = df[(df['type_displayName'] == 'Carry') & ((df['endX'] - df['x']) > 10)].assign(distance=lambda d: d['endX'] - d['x']).groupby(['playerId', 'matchId'])['distance'].sum().rename("progressive_carry_distance")
-        recoveries = df[df['type_displayName'] == 'Recovery'].groupby(['playerId', 'matchId']).size().rename("recoveries")
-        interceptions = df[df['type_displayName'] == 'Interception'].groupby(['playerId', 'matchId']).size().rename("interceptions")
-        clearances = df[df['type_displayName'] == 'Clearance'].groupby(['playerId', 'matchId']).size().rename("clearances")
-        def_actions_outside_box = df[(df['x'] > 25) & df['type_displayName'].isin(['Tackle', 'Interception', 'Clearance'])].groupby(['playerId', 'matchId']).size().rename("def_actions_outside_box")
-        shot_creation_actions = df[df['value_ShotAssist'] > 0].groupby(['playerId', 'matchId']).size().rename("shot_creation_actions")
-        xG = df.groupby(['playerId', 'matchId'])['xG'].sum().rename("xG")
-        xA = df.groupby(['playerId', 'matchId'])['xA'].sum().rename("xA")
-        ps_xG = df.groupby(['playerId', 'matchId'])['ps_xG'].sum().rename("ps_xG")
-        return pd.concat([
-            passes_into_penalty_area, carries_into_final_third, carries_into_penalty_area, goals, assists, crosses,
-            long_pass_pct, progressive_pass_distance, progressive_carry_distance, recoveries, interceptions,
-            clearances, def_actions_outside_box, shot_creation_actions, xG, xA, ps_xG
-        ], axis=1).fillna(0).reset_index()
+    # --- Step 4: Calculate Event Metrics ---
+    # (you already have the event metrics logic inside db_utils if needed)
 
-    # 6. Merge and calculate KPIs
-    event_metrics_top5 = calculate_event_metrics(event_data_top5)
-    player_stats_top5 = player_stats_top5.drop_duplicates(subset=["playerId", "matchId"])
-    metrics_top5_df = pd.merge(player_stats_top5, event_metrics_top5, on=["playerId", "matchId"], how="left").fillna(0)
+    # Merge player_stats and event_metrics manually like in section 2
+    merged_top5 = pd.merge(
+        player_stats_top5,
+        event_data_top5,
+        on=["playerId", "matchId"],
+        how="left"
+    ).fillna(0)
 
-    metrics_top5_df['pass_completion_pct'] = (metrics_top5_df['passesAccurate'] / metrics_top5_df['passesTotal'].replace(0, np.nan)) * 100
-    metrics_top5_df['aerial_duel_pct'] = (metrics_top5_df['aerialsWon'] / metrics_top5_df['aerialsTotal'].replace(0, np.nan)) * 100
-    metrics_top5_df['take_on_success_pct'] = (metrics_top5_df['dribblesWon'] / metrics_top5_df['dribblesAttempted'].replace(0, np.nan)) * 100
-    metrics_top5_df['shots_on_target_pct'] = (metrics_top5_df['shotsOnTarget'] / metrics_top5_df['shotsTotal'].replace(0, np.nan)) * 100
-    metrics_top5_df['tackle_success_pct'] = (metrics_top5_df['tackleSuccessful'] / metrics_top5_df['tacklesTotal'].replace(0, np.nan)) * 100
-    metrics_top5_df['throwin_accuracy_pct'] = (metrics_top5_df['throwInsAccurate'] / metrics_top5_df['throwInsTotal'].replace(0, np.nan)) * 100
-    metrics_top5_df['key_passes'] = metrics_top5_df['passesKey']
-    metrics_top5_df['goal_creating_actions'] = metrics_top5_df['passesKey'] + metrics_top5_df['dribblesWon']
-    metrics_top5_df['shot_creating_actions'] = metrics_top5_df['shotsTotal'] + metrics_top5_df['passesKey']
+    # KPIs
+    sum_metrics = [
+        "passes_into_penalty_area", "carries_into_final_third", "carries_into_penalty_area",
+        "goals", "assists", "crosses", "recoveries", "interceptions", "clearances",
+        "def_actions_outside_box", "shot_creation_actions", "xG", "xA", "ps_xG",
+        "key_passes", "goal_creating_actions", "shot_creating_actions"
+    ]
 
-    # Round percentage metrics
-    percent_cols = ['pass_completion_pct', 'aerial_duel_pct', 'take_on_success_pct', 'shots_on_target_pct', 'tackle_success_pct', 'throwin_accuracy_pct', 'long_pass_pct']
-    metrics_top5_df[percent_cols] = metrics_top5_df[percent_cols].round(1)
+    mean_metrics = [
+        "pass_completion_pct", "aerial_duel_pct", "take_on_success_pct",
+        "shots_on_target_pct", "tackle_success_pct", "throwin_accuracy_pct", "long_pass_pct",
+        "progressive_pass_distance", "progressive_carry_distance"
+    ]
 
-    # 🧪 DEBUG — Preview combined data
-    st.markdown("#### 🧪 Debug Preview of Combined Metrics Data")
-    st.write("🧪 metrics_top5_df shape:", metrics_top5_df.shape)
-    st.write("🧪 metrics_top5_df columns:", metrics_top5_df.columns.tolist())
-    st.dataframe(metrics_top5_df.head(10))
+    # --- Step 5: Calculate Metrics ---
+    summary_df_top5_metrics = calculate_top5_metrics(
+        merged_top5,
+        sum_metrics,
+        mean_metrics,
+        summary_df_top5
+    )
 
-    # 🧪 Debug before merging event and stats
-    st.markdown("### 🧪 DEBUG — Merging Stats and Events")
-    st.write("🔍 player_stats_top5 shape:", player_stats_top5.shape)
-    st.write("🔍 event_metrics_top5 shape:", event_metrics_top5.shape)
+    logged_player_df = calculate_logged_player_metrics(
+        metrics_summary,  # metrics_summary must come from Overview section
+        player_id,
+        player_name,
+        team_name,
+        sum_metrics,
+        mean_metrics
+    )
 
-    st.write("🧩 Unique playerIds in player_stats_top5:", player_stats_top5["playerId"].nunique())
-    st.write("🧩 Unique playerIds in event_metrics_top5:", event_metrics_top5["playerId"].nunique())
+    combined_metrics_df = pd.concat([summary_df_top5_metrics, logged_player_df], ignore_index=True)
+    combined_metrics_df = combined_metrics_df.drop_duplicates(subset="playerId", keep="first").reset_index(drop=True)
 
-    st.write("🧩 Sample playerId-matchId from player_stats_top5:")
-    st.dataframe(player_stats_top5[["playerId", "matchId"]].drop_duplicates().head())
-
-    st.write("🧩 Sample playerId-matchId from event_metrics_top5:")
-    st.dataframe(event_metrics_top5[["playerId", "matchId"]].drop_duplicates().head())
-
-
-    # Aggregate per player
-    summary_df_top5_metrics = metrics_top5_df.groupby("playerId", as_index=False).agg({key: "mean" for key in metric_labels.keys() if key in metrics_top5_df.columns})
-
-    # Merge player info
-    summary_df_top5_metrics = pd.merge(summary_df_top5[["playerId", "playerName", "teamName"]], summary_df_top5_metrics, on="playerId", how="left")
-
-    # Final display
+    # --- Step 6: Plot KPIs ---
     metric_keys = position_kpi_map.get(player_position, [])
-    if not metric_keys:
-        st.warning(f"No KPIs found for position: {player_position}")
-    else:
-        st.success(f"Metrics calculated for position: {player_position}")
 
-    st.markdown("### 📜 Metrics Table (Top 5 Players)")
-    st.dataframe(summary_df_top5_metrics[["playerName", "teamName"] + metric_keys], use_container_width=True)
+    if not metric_keys:
+        st.warning(f"No KPIs defined for position: {player_position}")
+    else:
+        plot_kpi_comparison(
+            combined_metrics_df,
+            metric_keys,
+            metric_labels,
+            player_name
+        )
