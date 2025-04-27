@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine
 from typing import List, Tuple
+import streamlit as st
+import altair as alt
 
 def connect_to_db():
     user = 'admin'
@@ -88,16 +90,17 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     Cleans and computes performance metrics for the logged-in player, including extended KPIs
     for all positions.
     """
-    # Filter data
+    # Filter data by player ID and name
     player_stats = player_stats[player_stats['playerId'] == player_id].copy()
-    event_data = event_data[event_data['playerName'].str.lower().str.contains(player_name.lower(), na=False)].copy()
+    event_data = event_data[
+        (event_data['playerId'] == player_id) &
+        (event_data['playerName'].str.lower().str.contains(player_name.lower(), na=False))
+    ].copy()
 
     # Clean numeric columns from player_stats
     metric_cols = player_stats.columns.drop(['playerId', 'playerName', 'matchId', 'field', 'teamId', 'teamName'], errors='ignore')
     for col in metric_cols:
-        player_stats[col] = (
-            player_stats[col].astype(str).str.replace(',', '.', regex=False)
-        )
+        player_stats[col] = player_stats[col].astype(str).str.replace(',', '.', regex=False)
         player_stats[col] = pd.to_numeric(player_stats[col], errors='coerce')
 
     # Clean event_data columns
@@ -113,52 +116,49 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
 
         passes_into_penalty_area = df[
             (df['value_PassEndX'] >= 94) &
-            (df['value_PassEndY'] >= 21) & (df['value_PassEndY'] <= 79)
-        ].groupby('matchId').size().rename('passes_into_penalty_area')
+            (df['value_PassEndY'].between(21, 79))
+        ].groupby(['playerId', 'matchId']).size().rename('passes_into_penalty_area')
 
         carries_into_final_third = df[
             (df['x'] < 66.7) & (df['endX'] >= 66.7)
-        ].groupby('matchId').size().rename('carries_into_final_third')
+        ].groupby(['playerId', 'matchId']).size().rename('carries_into_final_third')
 
         carries_into_penalty_area = df[
-            (df['endX'] >= 94) & (df['endY'] >= 21) & (df['endY'] <= 79)
-        ].groupby('matchId').size().rename('carries_into_penalty_area')
+            (df['endX'] >= 94) & (df['endY'].between(21, 79))
+        ].groupby(['playerId', 'matchId']).size().rename('carries_into_penalty_area')
 
-        goals = df[df['type_displayName'] == 'Goal'].groupby('matchId').size().rename('goals')
-
-        assists = df[df['value_IntentionalAssist'] == 1].groupby('matchId').size().rename('assists')
-
-        crosses = df[df['value_Cross'] == 1].groupby('matchId').size().rename('crosses')
+        goals = df[df['type_displayName'] == 'Goal'].groupby(['playerId', 'matchId']).size().rename('goals')
+        assists = df[df['value_IntentionalAssist'] == 1].groupby(['playerId', 'matchId']).size().rename('assists')
+        crosses = df[df['value_Cross'] == 1].groupby(['playerId', 'matchId']).size().rename('crosses')
 
         long_passes = df[df['value_Length'] >= 30]
-        long_passes_total = long_passes.groupby('matchId').size().rename('long_passes_total')
-        long_passes_success = long_passes[long_passes['outcomeType_displayName'] == 'Successful'].groupby('matchId').size().rename('long_passes_success')
+        long_passes_total = long_passes.groupby(['playerId', 'matchId']).size().rename('long_passes_total')
+        long_passes_success = long_passes[long_passes['outcomeType_displayName'] == 'Successful'].groupby(['playerId', 'matchId']).size().rename('long_passes_success')
         long_pass_pct = (long_passes_success / long_passes_total.replace(0, np.nan) * 100).rename('long_pass_pct')
 
-        progressive_pass_distance = df[(df['type_displayName'] == 'Pass') & (df['value_Length'] > 10)].groupby('matchId')['value_Length'].sum().rename('progressive_pass_distance')
+        progressive_pass_distance = df[
+            (df['type_displayName'] == 'Pass') & (df['value_Length'] > 10)
+        ].groupby(['playerId', 'matchId'])['value_Length'].sum().rename('progressive_pass_distance')
 
         progressive_carry_distance = df[
-            (df['type_displayName'] == 'Carry') & (df['endX'] - df['x'] > 10)
+            (df['type_displayName'] == 'Carry') & ((df['endX'] - df['x']) > 10)
         ].assign(distance=lambda d: d['endX'] - d['x']) \
-        .groupby('matchId')['distance'].sum() \
-        .rename('progressive_carry_distance')
+        .groupby(['playerId', 'matchId'])['distance'].sum().rename('progressive_carry_distance')
 
-        recoveries = df[df['type_displayName'] == 'Recovery'].groupby('matchId').size().rename('recoveries')
-
-        interceptions = df[df['type_displayName'] == 'Interception'].groupby('matchId').size().rename('interceptions')
-
-        clearances = df[df['type_displayName'] == 'Clearance'].groupby('matchId').size().rename('clearances')
+        recoveries = df[df['type_displayName'] == 'Recovery'].groupby(['playerId', 'matchId']).size().rename('recoveries')
+        interceptions = df[df['type_displayName'] == 'Interception'].groupby(['playerId', 'matchId']).size().rename('interceptions')
+        clearances = df[df['type_displayName'] == 'Clearance'].groupby(['playerId', 'matchId']).size().rename('clearances')
 
         defensive_actions_outside_box = df[
-            (df['x'] > 25) & 
+            (df['x'] > 25) &
             (df['type_displayName'].isin(['Tackle', 'Interception', 'Clearance']))
-        ].groupby('matchId').size().rename('def_actions_outside_box')
+        ].groupby(['playerId', 'matchId']).size().rename('def_actions_outside_box')
 
-        shot_creation_actions = df[df['value_ShotAssist'] > 0].groupby('matchId').size().rename('shot_creation_actions')
+        shot_creation_actions = df[df['value_ShotAssist'] > 0].groupby(['playerId', 'matchId']).size().rename('shot_creation_actions')
 
-        xG = df.groupby('matchId')['xG'].sum().rename('xG')
-        xA = df.groupby('matchId')['xA'].sum().rename('xA')
-        ps_xG = df.groupby('matchId')['ps_xG'].sum().rename('ps_xG')
+        xG = df.groupby(['playerId', 'matchId'])['xG'].sum().rename('xG')
+        xA = df.groupby(['playerId', 'matchId'])['xA'].sum().rename('xA')
+        ps_xG = df.groupby(['playerId', 'matchId'])['ps_xG'].sum().rename('ps_xG')
 
         return pd.concat([
             passes_into_penalty_area,
@@ -183,7 +183,7 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     event_metrics = calculate_event_metrics(event_data)
 
     # Merge and compute derived metrics
-    metrics_summary = pd.merge(player_stats, event_metrics, on='matchId', how='left').fillna(0)
+    metrics_summary = pd.merge(player_stats, event_metrics, on=['playerId', 'matchId'], how='left').fillna(0)
 
     metrics_summary['pass_completion_pct'] = (metrics_summary['passesAccurate'] / metrics_summary['passesTotal'].replace(0, np.nan)) * 100
     metrics_summary['aerial_duel_pct'] = (metrics_summary['aerialsWon'] / metrics_summary['aerialsTotal'].replace(0, np.nan)) * 100
@@ -192,22 +192,22 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     metrics_summary['tackle_success_pct'] = (metrics_summary['tackleSuccessful'] / metrics_summary['tacklesTotal'].replace(0, np.nan)) * 100
     metrics_summary['throwin_accuracy_pct'] = (metrics_summary['throwInsAccurate'] / metrics_summary['throwInsTotal'].replace(0, np.nan)) * 100
 
-    # Add final KPIs
+    # Final KPIs
     metrics_summary["key_passes"] = metrics_summary["passesKey"]
     metrics_summary["goal_creating_actions"] = metrics_summary["passesKey"] + metrics_summary["dribblesWon"]
     metrics_summary["shot_creating_actions"] = metrics_summary["shotsTotal"] + metrics_summary["passesKey"]
 
-    # Round selected columns
+    # Round percent columns
     percent_cols = [
         'pass_completion_pct', 'aerial_duel_pct', 'take_on_success_pct',
         'shots_on_target_pct', 'tackle_success_pct', 'throwin_accuracy_pct', 'long_pass_pct'
     ]
     metrics_summary[percent_cols] = metrics_summary[percent_cols].round(1)
 
-    # Drop potential matchId duplicates caused by merges
-    metrics_summary = metrics_summary.drop_duplicates(subset="matchId", keep="last").reset_index(drop=True)
+    metrics_summary = metrics_summary.drop_duplicates(subset=["matchId"], keep="last").reset_index(drop=True)
 
     return metrics_summary
+
 
 def prepare_player_data_with_minutes(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -583,7 +583,7 @@ def get_top5_players_by_position(
     filtered["subbedInExpandedMinute"] = pd.to_numeric(filtered["subbedInExpandedMinute"], errors="coerce")
     filtered["subbedOutExpandedMinute"] = pd.to_numeric(filtered["subbedOutExpandedMinute"], errors="coerce")
 
-    def get_minutes(row):
+    def get_minutes (row):
         if row["isFirstEleven"] == 1:
             return row["subbedOutExpandedMinute"] if pd.notna(row["subbedOutExpandedMinute"]) else 90.0
         elif pd.notna(row["subbedInExpandedMinute"]):
@@ -695,3 +695,164 @@ def calculate_kpis_comparison(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].round(1)
 
     return df.reset_index(drop=True)
+
+def get_top5_teams(match_data, team_data, start_date, end_date):
+    match_data["startDate"] = pd.to_datetime(match_data["startDate"], errors="coerce")
+    filtered_matches = match_data[(match_data["startDate"].dt.date >= start_date) & (match_data["startDate"].dt.date <= end_date)]
+
+    score_split = filtered_matches["score"].str.replace(" ", "", regex=False).str.split(":", expand=True)
+    filtered_matches["home_goals"] = pd.to_numeric(score_split[0], errors="coerce")
+    filtered_matches["away_goals"] = pd.to_numeric(score_split[1], errors="coerce")
+
+    team_scores_df = pd.merge(team_data, filtered_matches[["matchId", "home_goals", "away_goals"]], on="matchId", how="inner")
+    team_scores_df["home_away"] = team_scores_df.apply(lambda row: "home" if row["scores.fulltime"] == row["home_goals"] else "away", axis=1)
+
+    def assign_points(row):
+        if row["home_away"] == "home":
+            return 3 if row["home_goals"] > row["away_goals"] else 1 if row["home_goals"] == row["away_goals"] else 0
+        else:
+            return 3 if row["away_goals"] > row["home_goals"] else 1 if row["away_goals"] == row["home_goals"] else 0
+
+    team_scores_df["points"] = team_scores_df.apply(assign_points, axis=1)
+
+    team_points = (
+        team_scores_df
+        .groupby(["teamId", "teamName"], as_index=False)["points"]
+        .sum()
+        .sort_values(by="points", ascending=False)
+        .head(5)
+    )
+
+    return team_points
+
+def get_top5_players(all_player_stats, player_info_df, match_data, team_data, position_codes, top_team_ids, start_date, end_date):
+    players_full = pd.merge(
+        all_player_stats,
+        player_info_df[['playerId', 'matchId', 'position', 'age', 'shirtNo', 'height', 'weight', 'isFirstEleven', 'subbedInExpandedMinute', 'subbedOutExpandedMinute']],
+        on=['playerId', 'matchId'], how='left'
+    )
+    players_full = pd.merge(players_full, match_data[['matchId', 'startDate']], on='matchId', how='left')
+    players_full['startDate'] = pd.to_datetime(players_full['startDate'])
+
+    players_full['ratings_clean'] = pd.to_numeric(players_full['ratings'].astype(str).str.replace(",", "."), errors='coerce')
+    players_full = players_full.drop_duplicates(subset=["playerId", "matchId"])
+
+    players_full['minutesPlayed'] = players_full.apply(lambda row: get_minutes(row), axis=1)
+
+    summary_df_top5 = (
+        players_full.groupby(["playerId", "playerName"], as_index=False)
+        .agg(
+            teamId=("teamId", "first"),
+            age=("age", "first"),
+            shirtNo=("shirtNo", "first"),
+            height=("height", "first"),
+            weight=("weight", "first"),
+            matches_played=("matchId", "nunique"),
+            games_as_starter=("isFirstEleven", "sum"),
+            total_minutes=("minutesPlayed", "sum"),
+            total_rating=("ratings_clean", "sum")
+        )
+    )
+
+    summary_df_top5 = pd.merge(summary_df_top5, team_data[["teamId", "teamName"]], on="teamId", how="left")
+    summary_df_top5 = summary_df_top5.sort_values(by="total_rating", ascending=False).drop_duplicates(subset="playerId").head(5)
+
+    return summary_df_top5
+
+def get_minutes(row):
+    if row['isFirstEleven'] == 1:
+        return row['subbedOutExpandedMinute'] if pd.notna(row['subbedOutExpandedMinute']) else 90.0
+    elif pd.notna(row['subbedInExpandedMinute']):
+        return row['subbedOutExpandedMinute'] - row['subbedInExpandedMinute'] if pd.notna(row['subbedOutExpandedMinute']) else 90.0 - row['subbedInExpandedMinute']
+    else:
+        return 0.0
+
+def calculate_top5_metrics(merged_top5, sum_metrics, mean_metrics, summary_df_top5):
+    aggregation_dict = {}
+    for metric in sum_metrics:
+        if metric in merged_top5.columns:
+            aggregation_dict[metric] = "sum"
+    for metric in mean_metrics:
+        if metric in merged_top5.columns:
+            aggregation_dict[metric] = "mean"
+
+    summary_df_top5_metrics = (
+        merged_top5
+        .groupby("playerId", as_index=False)
+        .agg(aggregation_dict)
+    )
+
+    summary_df_top5_metrics = pd.merge(
+        summary_df_top5[["playerId", "playerName", "teamName"]],
+        summary_df_top5_metrics,
+        on="playerId", how="left"
+    )
+    return summary_df_top5_metrics
+
+def calculate_logged_player_metrics(metrics_summary, player_id, player_name, team_name, sum_metrics, mean_metrics):
+    logged_player_agg = {}
+    for metric in sum_metrics:
+        if metric in metrics_summary.columns:
+            logged_player_agg[metric] = metrics_summary[metric].sum()
+    for metric in mean_metrics:
+        if metric in metrics_summary.columns:
+            logged_player_agg[metric] = metrics_summary[metric].mean()
+
+    logged_player_df = pd.DataFrame({
+        "playerId": [player_id],
+        "playerName": [player_name],
+        "teamName": [team_name],
+        **logged_player_agg
+    })
+    return logged_player_df
+
+def plot_kpi_comparison(combined_metrics_df, metric_keys, metric_labels, player_name):
+    st.markdown("### 📊 KPI Comparison")
+    for key in metric_keys:
+        chart_data = combined_metrics_df[["playerName", "teamName", key]].dropna().copy()
+
+        if chart_data.empty:
+            continue
+
+        season_avg = chart_data[key].mean()
+
+        with st.container(border=True):
+            st.markdown(f"**{metric_labels.get(key, key)}**")
+
+            chart_data["color"] = chart_data["playerName"].apply(
+                lambda name: "#FFD700" if name == player_name else "#d3d3d3"
+            )
+
+            tooltip_fields = [
+                alt.Tooltip("playerName:N", title="Player"),
+                alt.Tooltip(f"{key}:Q", title=metric_labels.get(key, key), format=".2f")
+            ]
+
+            bar_chart = alt.Chart(chart_data).mark_bar().encode(
+                x=alt.X("playerName:N", title="Player", sort="-y"),
+                y=alt.Y(f"{key}:Q", title=metric_labels.get(key, key)),
+                color=alt.Color("color:N", scale=None),
+                tooltip=tooltip_fields
+            )
+
+            avg_line = alt.Chart(pd.DataFrame({"y": [season_avg]})).mark_rule(
+                color="red", strokeDash=[4, 4]
+            ).encode(y="y:Q")
+
+            avg_text = alt.Chart(pd.DataFrame({
+                "x": [chart_data["playerName"].iloc[-1]],
+                "y": [season_avg],
+                "label": [f"Avg: {season_avg:.1f}"]
+            })).mark_text(
+                align="left",
+                baseline="bottom",
+                dy=-5,
+                color="red"
+            ).encode(
+                x=alt.X("x:N"),
+                y=alt.Y("y:Q"),
+                text="label:N"
+            )
+
+            chart = (bar_chart + avg_line + avg_text).properties(height=300)
+            st.altair_chart(chart, use_container_width=True)
