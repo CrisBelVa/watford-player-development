@@ -4,13 +4,21 @@ from sqlalchemy import create_engine
 from typing import List, Tuple
 import streamlit as st
 import altair as alt
+from dotenv import load_dotenv
+import os
 
 def connect_to_db():
-    user = 'admin'
-    password = 'mbdsf*2022'
-    host = 'dbmbds.cfngygfor8bi.us-east-1.rds.amazonaws.com'
-    port = 3306
-    database = 'db_watford'
+    load_dotenv()
+
+    user = os.getenv("DB_USER")
+    password = os.getenv("DB_PASSWORD")
+    host = os.getenv("DB_HOST")
+    port = os.getenv("DB_PORT")
+    database = os.getenv("DB_NAME")
+
+    if not all([user, password, host, port, database]):
+        st.error("Database credentials are missing.")
+        return None
 
     engine = create_engine(f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}")
     return engine
@@ -183,8 +191,6 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     event_metrics = calculate_event_metrics(event_data)
 
     # Merge and compute derived metrics
-    metrics_summary = pd.merge(player_stats, event_metrics, on=['playerId', 'matchId'], how='left').fillna(0)
-
     metrics_summary['pass_completion_pct'] = (metrics_summary['passesAccurate'] / metrics_summary['passesTotal'].replace(0, np.nan)) * 100
     metrics_summary['aerial_duel_pct'] = (metrics_summary['aerialsWon'] / metrics_summary['aerialsTotal'].replace(0, np.nan)) * 100
     metrics_summary['take_on_success_pct'] = (metrics_summary['dribblesWon'] / metrics_summary['dribblesAttempted'].replace(0, np.nan)) * 100

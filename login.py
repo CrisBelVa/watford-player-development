@@ -55,4 +55,4 @@ if not st.session_state.logged_in:
                 st.error("Invalid credentials or not a Watford player.")
 
 if st.session_state.logged_in:
-    st.switch_page("pages/Player_Dashboard.py")
+    st.switch_page("pages/player_dashboard.py")
