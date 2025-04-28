@@ -98,27 +98,34 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     Cleans and computes performance metrics for the logged-in player, including extended KPIs
     for all positions.
     """
-    # Filter data by player ID and name
+    # --- Safety Check ---
+    if player_stats is None or player_stats.empty:
+        st.error("🚨 No player stats available for this player.")
+        return pd.DataFrame()
+
+    if event_data is None or event_data.empty:
+        st.error("🚨 No event data available for this player.")
+        return pd.DataFrame()
+
+    # --- Step 1: Filter by player ---
     player_stats = player_stats[player_stats['playerId'] == player_id].copy()
     event_data = event_data[
         (event_data['playerId'] == player_id) &
         (event_data['playerName'].str.lower().str.contains(player_name.lower(), na=False))
     ].copy()
 
-    # Clean numeric columns from player_stats
+    # --- Step 2: Clean numeric columns ---
     metric_cols = player_stats.columns.drop(['playerId', 'playerName', 'matchId', 'field', 'teamId', 'teamName'], errors='ignore')
     for col in metric_cols:
         player_stats[col] = player_stats[col].astype(str).str.replace(',', '.', regex=False)
         player_stats[col] = pd.to_numeric(player_stats[col], errors='coerce')
 
-    # Clean event_data columns
-    event_data['playerName'] = event_data['playerName'].astype(str).str.lower()
     for col in ['x', 'y', 'value_PassEndX', 'value_PassEndY', 'endX', 'endY', 'value_Length', 'xG', 'xA', 'ps_xG']:
         if col in event_data.columns:
             event_data[col] = event_data[col].astype(str).str.replace(',', '.', regex=False)
             event_data[col] = pd.to_numeric(event_data[col], errors='coerce')
 
-    # Compute advanced metrics from event_data
+    # --- Step 3: Calculate event-based metrics ---
     def calculate_event_metrics(df):
         df = df.copy()
 
@@ -151,7 +158,7 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
         progressive_carry_distance = df[
             (df['type_displayName'] == 'Carry') & ((df['endX'] - df['x']) > 10)
         ].assign(distance=lambda d: d['endX'] - d['x']) \
-        .groupby(['playerId', 'matchId'])['distance'].sum().rename('progressive_carry_distance')
+         .groupby(['playerId', 'matchId'])['distance'].sum().rename('progressive_carry_distance')
 
         recoveries = df[df['type_displayName'] == 'Recovery'].groupby(['playerId', 'matchId']).size().rename('recoveries')
         interceptions = df[df['type_displayName'] == 'Interception'].groupby(['playerId', 'matchId']).size().rename('interceptions')
@@ -172,25 +179,27 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
             passes_into_penalty_area,
             carries_into_final_third,
             carries_into_penalty_area,
-            goals,
-            assists,
-            crosses,
+            goals, assists, crosses,
             long_pass_pct,
             progressive_pass_distance,
             progressive_carry_distance,
-            recoveries,
-            interceptions,
-            clearances,
+            recoveries, interceptions, clearances,
             defensive_actions_outside_box,
             shot_creation_actions,
-            xG,
-            xA,
-            ps_xG
+            xG, xA, ps_xG
         ], axis=1).fillna(0).reset_index()
 
     event_metrics = calculate_event_metrics(event_data)
 
-    # Merge and compute derived metrics
+    # --- Step 4: Merge stats + events ---
+    metrics_summary = pd.merge(
+        player_stats,
+        event_metrics,
+        on=["playerId", "matchId"],
+        how="left"
+    ).fillna(0)
+
+    # --- Step 5: Create Derived KPIs ---
     metrics_summary['pass_completion_pct'] = (metrics_summary['passesAccurate'] / metrics_summary['passesTotal'].replace(0, np.nan)) * 100
     metrics_summary['aerial_duel_pct'] = (metrics_summary['aerialsWon'] / metrics_summary['aerialsTotal'].replace(0, np.nan)) * 100
     metrics_summary['take_on_success_pct'] = (metrics_summary['dribblesWon'] / metrics_summary['dribblesAttempted'].replace(0, np.nan)) * 100
@@ -198,12 +207,11 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     metrics_summary['tackle_success_pct'] = (metrics_summary['tackleSuccessful'] / metrics_summary['tacklesTotal'].replace(0, np.nan)) * 100
     metrics_summary['throwin_accuracy_pct'] = (metrics_summary['throwInsAccurate'] / metrics_summary['throwInsTotal'].replace(0, np.nan)) * 100
 
-    # Final KPIs
     metrics_summary["key_passes"] = metrics_summary["passesKey"]
     metrics_summary["goal_creating_actions"] = metrics_summary["passesKey"] + metrics_summary["dribblesWon"]
     metrics_summary["shot_creating_actions"] = metrics_summary["shotsTotal"] + metrics_summary["passesKey"]
 
-    # Round percent columns
+    # --- Step 6: Final Cleanup ---
     percent_cols = [
         'pass_completion_pct', 'aerial_duel_pct', 'take_on_success_pct',
         'shots_on_target_pct', 'tackle_success_pct', 'throwin_accuracy_pct', 'long_pass_pct'
@@ -213,6 +221,7 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     metrics_summary = metrics_summary.drop_duplicates(subset=["matchId"], keep="last").reset_index(drop=True)
 
     return metrics_summary
+
 
 
 def prepare_player_data_with_minutes(df: pd.DataFrame) -> pd.DataFrame:
@@ -285,227 +294,6 @@ def load_player_data(player_id, player_name):
 
     return event_data, match_data, player_data, team_data, player_stats, total_minutes, games_as_starter
 
-
-###### CHECK IF WE NEED THIS ###########
-
-
-
-
-
-###### def get_top5_aml_players(start_date, end_date, match_data, team_data, player_stats, player_data):
-    """
-    Returns AML players from top 5 teams during the filtered period,
-    including calculated KPIs ready for comparison dashboard.
-
-    Parameters:
-    - start_date, end_date: date filter range
-    - match_data, team_data, player_stats, player_data: DataFrames
-
-    Returns:
-    - DataFrame with all AML players from top 5 teams + metric_keys KPIs
-    """
-
-    # --- Filter match_data by date ---
-    match_data = match_data.copy()
-    match_data['startDate'] = pd.to_datetime(match_data['startDate'])
-    match_data_filtered = match_data[
-        (match_data['startDate'] >= pd.to_datetime(start_date)) &
-        (match_data['startDate'] <= pd.to_datetime(end_date))
-    ]
-
-    # --- Extract home and away goals from match_data ---
-    score_split = match_data_filtered['score'].str.replace(" ", "", regex=False).str.split(":", expand=True)
-    match_data_filtered['home_goals'] = pd.to_numeric(score_split[0], errors='coerce')
-    match_data_filtered['away_goals'] = pd.to_numeric(score_split[1], errors='coerce')
-
-    # --- Merge team_data with scores ---
-    team_data = team_data.copy()
-    team_scores_df = pd.merge(
-        team_data,
-        match_data_filtered[['matchId', 'home_goals', 'away_goals']],
-        on='matchId',
-        how='left'
-    )
-
-    # --- Infer home/away by comparing team score and home_goals ---
-    team_scores_df['home_away'] = team_scores_df.apply(
-        lambda row: 'home' if row['scores.fulltime'] == row['home_goals'] else 'away',
-        axis=1
-    )
-
-    # --- Assign points ---
-    def assign_points(row):
-        if row['home_away'] == 'home':
-            if row['home_goals'] > row['away_goals']:
-                return 3
-            elif row['home_goals'] == row['away_goals']:
-                return 1
-            else:
-                return 0
-        else:
-            if row['away_goals'] > row['home_goals']:
-                return 3
-            elif row['away_goals'] == row['home_goals']:
-                return 1
-            else:
-                return 0
-
-    team_scores_df['points'] = team_scores_df.apply(assign_points, axis=1)
-
-    # --- Get top 5 teams by total points ---
-    top5_teams = (
-        team_scores_df
-        .groupby(['teamId', 'teamName'], as_index=False)['points']
-        .sum()
-        .sort_values(by='points', ascending=False)
-        .head(5)
-    )
-
-    # --- Merge player_stats with player_data to get position/age/etc ---
-    players_full = pd.merge(
-        player_stats,
-        player_data[['playerId', 'matchId', 'position', 'age', 'shirtNo', 'height', 'weight']],
-        on=['playerId', 'matchId'],
-        how='left'
-    )
-
-    # --- Filter only AML players from top 5 teams ---
-    aml_players = players_full[
-        (players_full['position'] == 'AML') &
-        (players_full['teamId'].isin(top5_teams['teamId']))
-    ]
-
-    print("🔎 POSIÇÕES DISPONÍVEIS:", players_full['position'].dropna().unique())
-    print("🔎 TEAM IDs DISPONÍVEIS:", players_full['teamId'].dropna().unique())
-    print("🔎 PLAYER FULL SHAPE:", players_full.shape)
-    print("🔎 TOP5 TEAM IDs:", top5_teams['teamId'].tolist())
-
-    # --- Convert ratings to float ---
-    aml_players['ratings_clean'] = (
-        aml_players['ratings']
-        .astype(str)
-        .str.replace(',', '.', regex=False)
-        .replace("None", pd.NA)
-    )
-    aml_players['ratings_clean'] = pd.to_numeric(aml_players['ratings_clean'], errors='coerce')
-
-    # --- Aggregate per player ---
-    aml_summary = (
-        aml_players
-        .groupby(['playerId', 'playerName', 'teamName'], as_index=False)
-        .agg(
-            average_rating=('ratings_clean', 'mean'),
-            total_rating=('ratings_clean', 'sum'),
-            matches_played=('matchId', 'nunique'),
-            passesAccurate=('passesAccurate', 'sum'),
-            passesTotal=('passesTotal', 'sum'),
-            passesKey=('passesKey', 'sum'),
-            aerialsTotal=('aerialsTotal', 'sum'),
-            aerialsWon=('aerialsWon', 'sum'),
-            dribblesAttempted=('dribblesAttempted', 'sum'),
-            dribblesWon=('dribblesWon', 'sum'),
-            shotsTotal=('shotsTotal', 'sum'),
-            shotsOnTarget=('shotsOnTarget', 'sum'),
-            age=('age', 'first'),
-            shirtNo=('shirtNo', 'first'),
-            height=('height', 'first'),
-            weight=('weight', 'first')
-        )
-    )
-
-    # --- Add KPI calculations directly ---
-    df = aml_summary.copy()
-
-    def to_float(col):
-        return pd.to_numeric(df[col].astype(str).str.replace(",", ".", regex=False).replace("None", pd.NA), errors="coerce").fillna(0)
-
-    df["passesAccurate"] = to_float("passesAccurate")
-    df["passesTotal"] = to_float("passesTotal")
-    df["passesKey"] = to_float("passesKey")
-    df["aerialsTotal"] = to_float("aerialsTotal")
-    df["aerialsWon"] = to_float("aerialsWon")
-    df["dribblesAttempted"] = to_float("dribblesAttempted")
-    df["dribblesWon"] = to_float("dribblesWon")
-    df["shotsTotal"] = to_float("shotsTotal")
-    df["shotsOnTarget"] = to_float("shotsOnTarget")
-
-    df["pass_completion_pct"] = (df["passesAccurate"] / df["passesTotal"].replace(0, pd.NA)) * 100
-    df["aerial_duel_pct"] = (df["aerialsWon"] / df["aerialsTotal"].replace(0, pd.NA)) * 100
-    df["take_on_success_pct"] = (df["dribblesWon"] / df["dribblesAttempted"].replace(0, pd.NA)) * 100
-    df["shots_on_target_pct"] = (df["shotsOnTarget"] / df["shotsTotal"].replace(0, pd.NA)) * 100
-
-    df["key_passes"] = df["passesKey"] / df["matches_played"].replace(0, pd.NA)
-    df["goal_creating_actions"] = (df["passesKey"] + df["dribblesWon"]) / df["matches_played"].replace(0, pd.NA)
-    df["shot_creating_actions"] = (df["shotsTotal"] + df["passesKey"]) / df["matches_played"].replace(0, pd.NA)
-
-    df[["pass_completion_pct", "aerial_duel_pct", "take_on_success_pct", "shots_on_target_pct"]] = df[[
-        "pass_completion_pct", "aerial_duel_pct", "take_on_success_pct", "shots_on_target_pct"
-    ]].round(1)
-
-    return df
-
-
-
-########## def calculate_kpis_for_comparison(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Given a dataframe of AML players, calculate and add all KPIs used in the dashboard comparison.
-
-    The function assumes the input dataframe is aggregated by player
-    (e.g., one row per player with summed totals across matches).
-    """
-    df = df.copy()
-
-    # --- Define columns to convert from text to float ---
-    raw_columns = [
-        "passesTotal", "passesAccurate", "passesKey",
-        "aerialsTotal", "aerialsWon", "dribblesAttempted", "dribblesWon",
-        "shotsTotal", "shotsOnTarget", "goals"
-    ]
-
-    # --- Convert European text format to float safely ---
-    for col in raw_columns:
-        if col in df.columns:
-            df[col] = (
-                df[col]
-                .astype(str)
-                .str.replace(",", ".", regex=False)
-                .replace(["None", "nan", "NaN"], pd.NA)
-            )
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-    # --- Avoid division by zero using .replace(0, pd.NA) ---
-    df["pass_completion_pct"] = (df["passesAccurate"] / df["passesTotal"].replace(0, pd.NA)) * 100
-    df["aerial_duel_pct"] = (df["aerialsWon"] / df["aerialsTotal"].replace(0, pd.NA)) * 100
-    df["take_on_success_pct"] = (df["dribblesWon"] / df["dribblesAttempted"].replace(0, pd.NA)) * 100
-    df["shots_on_target_pct"] = (df["shotsOnTarget"] / df["shotsTotal"].replace(0, pd.NA)) * 100
-
-    # --- Normalize per match (assumes matches_played is correct) ---
-    df["key_passes"] = df["passesKey"] / df["matches_played"].replace(0, pd.NA)
-    df["goal_creating_actions"] = (df["passesKey"] + df["dribblesWon"]) / df["matches_played"].replace(0, pd.NA)
-    df["shot_creating_actions"] = (df["shotsTotal"] + df["passesKey"]) / df["matches_played"].replace(0, pd.NA)
-
-    # --- Optional: Normalize additional metrics per match ---
-    optional_cols = [
-        "passes_into_penalty_area", "carries_into_final_third",
-        "carries_into_penalty_area", "goals"
-    ]
-
-    for col in optional_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col].astype(str).str.replace(",", ".", regex=False).replace(["None", "nan"], pd.NA),
-                errors="coerce"
-            ).fillna(0)
-            df[col] = df[col] / df["matches_played"].replace(0, pd.NA)
-
-    # --- Round percentage columns to 1 decimal place ---
-    pct_cols = [
-        "pass_completion_pct", "aerial_duel_pct",
-        "take_on_success_pct", "shots_on_target_pct"
-    ]
-    df[pct_cols] = df[pct_cols].round(1)
-
-    return df
 
 
 def get_top5_players_by_position(
