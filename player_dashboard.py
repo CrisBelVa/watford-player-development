@@ -10,19 +10,10 @@ from datetime import timedelta
 from PIL import Image
 from db_utils import connect_to_db
 from db_utils import load_player_data 
-from db_utils import load_all_data 
 from db_utils import get_player_position
 from db_utils import process_player_metrics
-from db_utils import (
-    get_top5_teams,
-    get_top5_players,
-    get_minutes,
-    calculate_top5_metrics,
-    calculate_logged_player_metrics,
-    plot_kpi_comparison
-)
+from db_utils import get_minutes,
 from db_utils import prepare_player_data_with_minutes
-from db_utils import calculate_kpis_comparison, get_top5_players_by_position
 from math import ceil
 from typing import Tuple
 from sqlalchemy import create_engine
