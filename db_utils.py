@@ -24,16 +24,6 @@ def connect_to_db():
     return engine
 
 
-def load_all_data():
-    engine = connect_to_db()
-    event_data = pd.read_sql("SELECT * FROM event_data", engine)
-    match_data = pd.read_sql("SELECT * FROM match_data", engine)
-    player_data = pd.read_sql("SELECT * FROM player_data", engine)
-    team_data = pd.read_sql("SELECT * FROM team_data", engine)
-    player_stats = pd.read_sql("SELECT * FROM player_stats", engine)
-    return event_data, match_data, player_data, team_data, player_stats
-
-
 def clean_numeric_columns(df):
     for col in df.columns:
         if df[col].dtype == 'object':
@@ -262,6 +252,7 @@ def prepare_player_data_with_minutes(df: pd.DataFrame) -> pd.DataFrame:
     df['minutesPlayed'] = df.apply(get_minutes, axis=1)
     return df
 
+@st.cache_data(ttl=3600)
 def load_player_data(player_id, player_name):
     engine = connect_to_db()
 
@@ -271,31 +262,47 @@ def load_player_data(player_id, player_name):
         params=(player_id,)
     )
 
-    event_data = pd.read_sql(
-        "SELECT * FROM event_data WHERE LOWER(playerName) LIKE %s",
-        con=engine,
-        params=(f"%{player_name.lower()}%",)
-    )
-
     match_data = pd.read_sql("SELECT * FROM match_data", engine)
     player_data = pd.read_sql(
         "SELECT * FROM player_data WHERE playerId = %s",
-        engine,
+        con=engine,
         params=(player_id,)
     )
     team_data = pd.read_sql("SELECT * FROM team_data", engine)
 
-    # Add minutesPlayed
+    # Prepare minutes played
     player_data = prepare_player_data_with_minutes(player_data)
 
     # Aggregates
     total_minutes = player_data['minutesPlayed'].sum()
     games_as_starter = player_data['isFirstEleven'].fillna(0).sum()
 
-    return event_data, match_data, player_data, team_data, player_stats, total_minutes, games_as_starter
+    return match_data, player_data, team_data, player_stats, total_minutes, games_as_starter
 
 
+@st.cache_data(ttl=300)
+def load_event_data_for_matches(player_id, match_ids):
+    """
+    Loads event_data for the given player and match IDs.
+    """
+    engine = connect_to_db()
 
+    if not match_ids:
+        return pd.DataFrame()
+
+    query = f"""
+    SELECT * FROM event_data
+    WHERE playerId = %s
+    AND matchId IN ({','.join(['%s' for _ in match_ids])})
+    """
+
+    params = tuple([player_id] + match_ids)  # 🛠️ Fix here
+
+    event_data = pd.read_sql(query, con=engine, params=params)
+
+    return event_data
+
+@st.cache_data(ttl=3600)
 def get_top5_players_by_position(
     start_date: str,
     end_date: str,
