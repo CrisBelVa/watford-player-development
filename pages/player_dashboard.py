@@ -73,6 +73,12 @@ position_kpi_map = {
         "pass_completion_pct", "progressive_pass_distance", "long_pass_pct",
         "passes_into_penalty_area", "key_passes"
     ],
+    "Midfielder": [
+        "pass_completion_pct", "key_passes",
+        "passes_into_penalty_area", "aerial_duel_pct", "take_on_success_pct",
+        "goal_creating_actions", "shot_creating_actions", "shots_on_target_pct",
+        "carries_into_final_third", "carries_into_penalty_area", "goals", "assists", "xG", "xA"
+    ],
     "Right Winger": [
         "pass_completion_pct", "key_passes",
         "passes_into_penalty_area", "crosses", "take_on_success_pct",
@@ -146,7 +152,9 @@ metric_labels = {
     "tackle_success_pct": "Tackle Success %",
     "shotsBlocked": "Shots Blocked",
     "shotsOffTarget": "Shots Off Target",
-    "shotsOnPost": "Shots on Post"
+    "shotsOnPost": "Shots on Post",
+    "save_pct": "Saves Success %",
+     "goals_conceded": "Goals Conceded"
 }
 
 # Metric type: affects delta logic
@@ -967,21 +975,21 @@ elif section == "Player Comparison":
         "teamName": "Team",
         "age": "Age",
         "shirtNo": "Shirt No",
-        "height": "Height (cm)",
-        "weight": "Weight (kg)",
-        "matches_played": "Matches Played",
+        "height": "Height",
+        "weight": "Weight",
+        "matches_played": "Games Played",
         "games_as_starter": "Games as Starter",
         "total_minutes": "Minutes Played"
     })
 
     # Select only the columns we want to display
     columns_to_display = [
-        "Player", "Team", "Age", "Shirt No", "Height (cm)", "Weight (kg)",
-        "Matches Played", "Minutes Played", "Games as Starter"
+        "Player", "Team", "Age", "Shirt No", "Height", "Weight",
+        "Games Played", "Games as Starter", "Minutes Played"
     ]
 
     # Optional: Sort the table by Matches Played or any field you prefer
-    summary_display = summary_display.sort_values(by="Matches Played", ascending=False)
+    summary_display = summary_display.sort_values(by="Games Played", ascending=False)
 
     # --- Step 4.6: Show Table ---
 
