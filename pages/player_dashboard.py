@@ -9,20 +9,11 @@ import base64
 from datetime import timedelta
 from PIL import Image
 from db_utils import connect_to_db
-from db_utils import load_player_data 
-from db_utils import load_all_data 
+from db_utils import load_player_data
+from db_utils import load_event_data_for_matches
 from db_utils import get_player_position
 from db_utils import process_player_metrics
-from db_utils import (
-    get_top5_teams,
-    get_top5_players,
-    get_minutes,
-    calculate_top5_metrics,
-    calculate_logged_player_metrics,
-    plot_kpi_comparison
-)
-from db_utils import prepare_player_data_with_minutes
-from db_utils import calculate_kpis_comparison, get_top5_players_by_position
+from db_utils import get_minutes
 from math import ceil
 from typing import Tuple
 from sqlalchemy import create_engine
@@ -52,7 +43,13 @@ st.title(f"{player_name}")
 
 # --- Load Data ---
 
-event_data, match_data, player_data, team_data, player_stats, total_minutes, games_as_starter = load_player_data(player_id, player_name)
+match_data, player_data, team_data, player_stats, total_minutes, games_as_starter = load_player_data(player_id, player_name)
+
+# After loading match_data:
+match_ids = player_data["matchId"].unique().tolist()
+
+# Now load event_data:
+event_data = load_event_data_for_matches(player_id, match_ids)
 
 position_kpi_map = {
     "Goalkeeper": [
@@ -709,18 +706,25 @@ elif section == "Trends Stats":
     else:
         trends_df = filtered_df.copy()
 
-    # Sort and assign order
+    # Sort by matchDate
     trends_df = trends_df.sort_values("matchDate").copy()
-    trends_df["match_label"] = trends_df["matchDate"].dt.strftime("%b %d") + " - " + trends_df["oppositionTeamName"]
+
+    # Create opponent_label once
+    trends_df["opponent_label"] = trends_df["matchDate"].dt.strftime("%b %d") + " - " + trends_df["oppositionTeamName"]
+
+    # Create match_order
     trends_df["match_order"] = range(len(trends_df))
 
-    # --- Match Filter Styled Like Excel ---
+    # Save order dictionary
+    match_order_dict = dict(zip(trends_df["opponent_label"], trends_df["match_order"]))
+
+    # --- Match Filter ---
     with st.expander("Filter by Match (click to hide)", expanded=True):
-        match_options = trends_df[["matchId", "match_label", "matchDate"]].drop_duplicates().sort_values("matchDate")
-        match_labels_dict = dict(zip(match_options["matchId"], match_options["match_label"]))
+        match_options = trends_df[["matchId", "opponent_label", "matchDate"]].drop_duplicates().sort_values("matchDate")
+        match_labels_dict = dict(zip(match_options["matchId"], match_options["opponent_label"]))
 
         search_text = st.text_input("🔍 Search match:", "")
-        filtered_options = match_options[match_options["match_label"].str.contains(search_text, case=False, na=False)]
+        filtered_options = match_options[match_options["opponent_label"].str.contains(search_text, case=False, na=False)]
 
         col1, col2 = st.columns([1, 1])
         with col1:
@@ -736,19 +740,19 @@ elif section == "Trends Stats":
         st.markdown("<div style='max-height: 250px; overflow-y: auto; padding: 0 10px;'>", unsafe_allow_html=True)
         for _, row in filtered_options.iterrows():
             checked = row["matchId"] in selected_ids
-            checkbox = st.checkbox(row["match_label"], value=checked, key=f"trends_match_{row['matchId']}")
+            checkbox = st.checkbox(row["opponent_label"], value=checked, key=f"trends_match_{row['matchId']}")
             if checkbox:
                 selected_match_ids.append(row["matchId"])
         st.markdown("</div>", unsafe_allow_html=True)
 
         st.session_state.selected_match_ids = selected_match_ids
 
-    # Apply match filter
+    # Apply match filter (but don't re-create opponent_label!)
     trends_df = trends_df[trends_df["matchId"].isin(st.session_state.selected_match_ids)]
-    trends_df["opponent_label"] = trends_df["matchDate"].dt.strftime("%b %d") + " - " + trends_df["oppositionTeamName"]
 
+    # --- Now Plot ---
     for key in metric_keys:
-        chart_data = trends_df[["opponent_label", "matchDate", "match_order", key] + metric_tooltip_fields.get(key, [])].dropna().copy()
+        chart_data = trends_df[["opponent_label", "matchDate", key] + metric_tooltip_fields.get(key, [])].dropna().copy()
 
         if chart_data.empty:
             continue
@@ -769,11 +773,11 @@ elif section == "Trends Stats":
                         alt.Tooltip(f"{extra_field}:Q", title=extra_field.replace("_", " ").title())
                     )
 
-            # Sort opponent_label explicitly based on match_order
-            sort_order = chart_data.sort_values("match_order")["opponent_label"].tolist()
+            # NEW: Sort opponent_label based on matchDate!
+            sort_order = list(chart_data.sort_values("matchDate")["opponent_label"])
 
             bar_chart = alt.Chart(chart_data).mark_bar(color="#fcec03").encode(
-                x=alt.X("opponent_label:N", title="Match", sort=sort_order),
+                x=alt.X("opponent_label:N", title="Match", sort=sort_order, axis=alt.Axis(labelAngle=-45)),
                 y=alt.Y(f"{key}:Q", title=metric_labels[key]),
                 tooltip=tooltip_fields
             )
@@ -783,7 +787,7 @@ elif section == "Trends Stats":
             ).encode(y="y:Q")
 
             avg_text = alt.Chart(pd.DataFrame({
-                "x": [chart_data["opponent_label"].iloc[-1]],
+                "x": [sort_order[-1]],
                 "y": [season_avg],
                 "label": [f"Avg: {season_avg:.1f}"]
             })).mark_text(
@@ -800,6 +804,7 @@ elif section == "Trends Stats":
             chart = (bar_chart + avg_line + avg_text).properties(height=300)
 
             st.altair_chart(chart, use_container_width=True)
+
 
 
 elif section == "Player Comparison":
@@ -866,26 +871,28 @@ elif section == "Player Comparison":
 
     top5_team_ids_str = ','.join(map(str, top_team_ids))
 
-    # Query player stats (filtered)
-    query_top5_players = f"""
-        SELECT ps.* FROM player_stats ps
-        JOIN player_data pd ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
-        JOIN match_data md ON ps.matchId = md.matchId
-        WHERE pd.position IN ({','.join([f"'{pos}'" for pos in position_codes])})
-        AND ps.teamId IN ({top5_team_ids_str})
-        AND md.startDate BETWEEN '{start_date}' AND '{end_date}'
-    """
-    all_player_stats = pd.read_sql(query_top5_players, connect_to_db())
+    # --- Query Top 5 Players and Player Info ---
+    with st.spinner('🔎 Loading Top 5 players and stats...'):
 
-    # Query player info (for extra fields: age, shirtNo, etc.)
-    query_player_info = f"""
-        SELECT * FROM player_data
-        WHERE playerId IN (
-            SELECT DISTINCT playerId FROM player_stats
-            WHERE teamId IN ({top5_team_ids_str})
-        )
-    """
-    player_info_df = pd.read_sql(query_player_info, connect_to_db())
+        query_top5_players = f"""
+            SELECT ps.* FROM player_stats ps
+            JOIN player_data pd ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
+            JOIN match_data md ON ps.matchId = md.matchId
+            WHERE pd.position IN ({','.join([f"'{pos}'" for pos in position_codes])})
+            AND ps.teamId IN ({top5_team_ids_str})
+            AND md.startDate BETWEEN '{start_date}' AND '{end_date}'
+        """
+        all_player_stats = pd.read_sql(query_top5_players, connect_to_db())
+
+        query_player_info = f"""
+            SELECT * FROM player_data
+            WHERE playerId IN (
+                SELECT DISTINCT playerId FROM player_stats
+                WHERE teamId IN ({top5_team_ids_str})
+            )
+        """
+        player_info_df = pd.read_sql(query_player_info, connect_to_db())
+
 
     # Merge everything
     players_full = pd.merge(
@@ -899,12 +906,6 @@ elif section == "Player Comparison":
     players_full['startDate'] = pd.to_datetime(players_full['startDate'])
     players_full['ratings_clean'] = pd.to_numeric(players_full['ratings'].astype(str).str.replace(",", "."), errors='coerce')
     players_full = players_full.drop_duplicates(subset=["playerId", "matchId"])
-
-    if players_full.empty:
-        st.error(f"🚨 No top 5 players found for position: {player_position}")
-        st.stop()
-    else:
-        st.success(f"✅ Found {players_full['playerId'].nunique()} players for: {player_position}")
 
     # --- Step 4: Aggregate and Rank Top 5 Players ---
 
@@ -1246,7 +1247,7 @@ elif section == "Player Comparison":
     if not metric_keys:
         st.warning(f"No KPIs defined for position: {player_position}")
     else:
-        st.markdown("### 📊 KPI Comparison")
+        st.info("Player Comparison")
 
         for key in metric_keys:
             chart_data = combined_metrics_df[["playerName", "teamName", key]].dropna().copy()
