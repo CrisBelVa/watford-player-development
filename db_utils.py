@@ -93,7 +93,6 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     import pandas as pd
     import streamlit as st
 
-    # --- Safety check ---
     if player_stats is None or player_stats.empty:
         st.error("🚨 No player stats available for this player.")
         return pd.DataFrame()
@@ -127,8 +126,9 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     def calculate_event_metrics(df):
         df = df.copy()
 
+        # --- Standard event-based metrics ---
         passes_into_penalty_area = df[
-            (df['value_PassEndX'] >= 94) & (df['value_PassEndY'].between(21, 79))
+            (df['value_PassEndX'] >= 88.5) & (df['value_PassEndY'].between(13.6, 54.4))
         ].groupby(['playerId', 'matchId']).size().rename('passes_into_penalty_area')
 
         carries_into_final_third = df[
@@ -136,34 +136,38 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
         ].groupby(['playerId', 'matchId']).size().rename('carries_into_final_third')
 
         carries_into_penalty_area = df[
-            (df['endX'] >= 94) & (df['endY'].between(21, 79))
+            (df['endX'] >= 88.5) & (df['endY'].between(13.6, 54.4))
         ].groupby(['playerId', 'matchId']).size().rename('carries_into_penalty_area')
 
         goals = df[df['type_displayName'] == 'Goal'].groupby(['playerId', 'matchId']).size().rename('goals')
-        assists = df[df['value_IntentionalAssist'] == 1].groupby(['playerId', 'matchId']).size().rename('assists')
+        assists = df[df['value_IntentionalGoalAssist'] == 1].groupby(['playerId', 'matchId']).size().rename('assists')
         crosses = df[df['value_Cross'] == 1].groupby(['playerId', 'matchId']).size().rename('crosses')
 
         long_passes = df[df['value_Length'] >= 30]
         long_passes_total = long_passes.groupby(['playerId', 'matchId']).size().rename('long_passes_total')
-        long_passes_success = long_passes[long_passes['outcomeType_displayName'] == 'Successful'].groupby(['playerId', 'matchId']).size().rename('long_passes_success')
+        long_passes_success = long_passes[long_passes['outcomeType_displayName'] == 'Successful']\
+            .groupby(['playerId', 'matchId']).size().rename('long_passes_success')
         long_pass_pct = (long_passes_success / long_passes_total.replace(0, np.nan) * 100).rename('long_pass_pct')
 
-        progressive_pass_distance = df[
-            (df['type_displayName'] == 'Pass') & (df['value_Length'] > 10)
-        ].groupby(['playerId', 'matchId'])['value_Length'].sum().rename('progressive_pass_distance')
+        progressive_passes = df[
+            (df['type_displayName'] == 'Pass') &
+            (df['outcomeType_displayName'] == 'Successful') &
+            (df['value_Length'] >= 9.11) &
+            (df['x'] >= 35) &
+            (~df['qualifiers'].str.contains('CornerTaken|Freekick', na=False))
+        ].groupby(['playerId', 'matchId']).size().rename('progressive_passes')
 
         progressive_carry_distance = df[
-            (df['type_displayName'] == 'Carry') & ((df['endX'] - df['x']) > 10)
+            (df['type_displayName'] == 'Carry') & ((df['endX'] - df['x']) >= 9.11)
         ].assign(distance=lambda d: d['endX'] - d['x']) \
-         .groupby(['playerId', 'matchId'])['distance'].sum().rename('progressive_carry_distance')
-
-        recoveries = df[df['type_displayName'] == 'BallRecovery'].groupby(['playerId', 'matchId']).size().rename('recoveries')
-        interceptions = df[df['type_displayName'] == 'Interception'].groupby(['playerId', 'matchId']).size().rename('interceptions')
-        clearances = df[df['type_displayName'] == 'Clearance'].groupby(['playerId', 'matchId']).size().rename('clearances')
+        .groupby(['playerId', 'matchId'])['distance'].sum().rename('progressive_carry_distance')
 
         def_actions_outside_box = df[
             (df['x'] > 25) & df['type_displayName'].isin(['Tackle', 'Interception', 'Clearance'])
         ].groupby(['playerId', 'matchId']).size().rename('def_actions_outside_box')
+
+        recoveries = df[df['type_displayName'] == 'BallRecovery']\
+            .groupby(['playerId', 'matchId']).size().rename('recoveries')
 
         shot_creation_actions = df[df['value_ShotAssist'] > 0].groupby(['playerId', 'matchId']).size().rename('shot_creation_actions')
 
@@ -171,6 +175,27 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
         xA = df.groupby(['playerId', 'matchId'])['xA'].sum().rename('xA')
         ps_xG = df.groupby(['playerId', 'matchId'])['ps_xG'].sum().rename('ps_xG')
 
+        goal_creating_actions = df[
+            df["value_LeadingToGoal"] > 0
+        ].groupby(["playerId", "matchId"]).size().rename("goal_creating_actions")
+
+        # --- ✅ Goalkeeper metrics for all players ---
+        saves = df[
+            (df["type_displayName"] == "SavedShot") &
+            (df["outcomeType_displayName"] == "Successful")
+        ].groupby(["playerId", "matchId"]).size().rename("saves")
+
+        shots_on_target_faced = df[
+            (df["isShot"] == 1) &
+            (df["type_displayName"].isin(["SavedShot", "Goal"]))
+        ].groupby(["playerId", "matchId"]).size().rename("shots_on_target_faced")
+
+        goals_conceded = df[
+            (df["isShot"] == 1) &
+            (df["type_displayName"] == "Goal")
+        ].groupby(["playerId", "matchId"]).size().rename("goals_conceded")
+
+        # --- ✅ Combine all ---
         return pd.concat([
             passes_into_penalty_area,
             carries_into_final_third,
@@ -179,69 +204,44 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
             long_passes_total,
             long_passes_success,
             long_pass_pct,
-            progressive_pass_distance,
+            progressive_passes,
             progressive_carry_distance,
-            recoveries,                # ✅ explicitly included
-            interceptions,             # ✅ explicitly included
-            clearances,                 # ✅ explicitly included
-            def_actions_outside_box,    # ✅ explicitly included
+            def_actions_outside_box,
+            recoveries,
             shot_creation_actions,
-            xG, xA, ps_xG
+            goal_creating_actions,
+            xG, xA, ps_xG,
+            saves,
+            shots_on_target_faced,
+            goals_conceded
         ], axis=1).fillna(0).reset_index()
 
+
     event_metrics = calculate_event_metrics(event_data)
+    
 
-    # --- Step 4: Save % and Goals Conceded Corrected ---
-    keeper_team_id = player_stats["teamId"].iloc[0]
+    # --- Step 4: Merge all data ---
+    metrics_summary = pd.merge(player_stats, event_metrics, on=["playerId", "matchId"], how="left").fillna(0)
 
-    saves = event_data[
-        (event_data["type_displayName"] == "SavedShot") &
-        (event_data["outcomeType_displayName"] == "Successful") &
-        (event_data["playerId"] == player_id)
-    ].groupby("matchId").size().rename("saves").reset_index()
-
-    shots_on_target_faced = event_data[
-        (event_data["isShot"] == 1) &
-        (event_data["type_displayName"].isin(["SavedShot", "Goal"]))
-    ].groupby("matchId").size().rename("shots_on_target_faced").reset_index()
-    shots_on_target_faced["playerId"] = player_id
-
-    goals_conceded = event_data[
-        (event_data["isShot"] == 1) &
-        (event_data["type_displayName"] == "Goal") &
-        (event_data["teamId"] != keeper_team_id)
-    ].groupby("matchId").size().rename("goals_conceded").reset_index()
-    goals_conceded["playerId"] = player_id
-
-    save_pct = pd.merge(saves, shots_on_target_faced, on="matchId", how="outer").fillna(0)
-    save_pct["playerId"] = player_id
-    save_pct["save_pct"] = (save_pct["saves"] / save_pct["shots_on_target_faced"].replace(0, np.nan)) * 100
-    save_pct["save_pct"] = save_pct["save_pct"].round(1)
-
-    # --- Step 5: Merge all ---
-    metrics_summary = pd.merge(player_stats, event_metrics, on=["playerId", "matchId"], how="left")
-    metrics_summary = pd.merge(metrics_summary, save_pct[["playerId", "matchId", "save_pct"]], on=["playerId", "matchId"], how="left")
-    metrics_summary = pd.merge(metrics_summary, shots_on_target_faced, on=["playerId", "matchId"], how="left")
-    metrics_summary = pd.merge(metrics_summary, goals_conceded, on=["playerId", "matchId"], how="left")
-    metrics_summary = metrics_summary.fillna(0)
-
-    # --- Step 6: Derived KPIs ---
+    # --- Step 5: Derived KPIs ---
     metrics_summary["pass_completion_pct"] = (metrics_summary["passesAccurate"] / metrics_summary["passesTotal"].replace(0, np.nan)) * 100
     metrics_summary["aerial_duel_pct"] = (metrics_summary["aerialsWon"] / metrics_summary["aerialsTotal"].replace(0, np.nan)) * 100
     metrics_summary["take_on_success_pct"] = (metrics_summary["dribblesWon"] / metrics_summary["dribblesAttempted"].replace(0, np.nan)) * 100
     metrics_summary["shots_on_target_pct"] = (metrics_summary["shotsOnTarget"] / metrics_summary["shotsTotal"].replace(0, np.nan)) * 100
     metrics_summary["tackle_success_pct"] = (metrics_summary["tackleSuccessful"] / metrics_summary["tacklesTotal"].replace(0, np.nan)) * 100
     metrics_summary["throwin_accuracy_pct"] = (metrics_summary["throwInsAccurate"] / metrics_summary["throwInsTotal"].replace(0, np.nan)) * 100
+    metrics_summary["save_pct"] = (metrics_summary["saves"] / metrics_summary["shots_on_target_faced"].replace(0, np.nan)) * 100
 
+    # --- Step 6: Custom assignments ---
     metrics_summary["key_passes"] = metrics_summary["passesKey"]
-    metrics_summary["goal_creating_actions"] = metrics_summary["passesKey"] + metrics_summary["dribblesWon"]
+    metrics_summary["goal_creating_actions"] = metrics_summary["goal_creating_actions"].fillna(0)
     metrics_summary["shot_creating_actions"] = metrics_summary["shotsTotal"] + metrics_summary["passesKey"]
 
     metrics_summary["claimsHigh"] = player_stats["claimsHigh"]
     metrics_summary["collected"] = player_stats["collected"]
     metrics_summary["totalSaves"] = player_stats["totalSaves"]
 
-    # --- Step 7: Clean up ---
+    # --- Step 7: Final formatting ---
     percent_cols = [
         "pass_completion_pct", "aerial_duel_pct", "take_on_success_pct",
         "shots_on_target_pct", "tackle_success_pct", "throwin_accuracy_pct",
