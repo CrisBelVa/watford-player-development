@@ -57,27 +57,26 @@ position_kpi_map = {
         "collected", "def_actions_outside_box", "ps_xG"
     ],
     "Right Back": [
-        "interceptions", "progressive_pass_distance", "recoveries",
+        "interceptions", "progressive_passes", "recoveries",
         "crosses", "take_on_success_pct", "pass_completion_pct"
     ],
     "Center Back": [
-        "interceptions", "progressive_pass_distance", "pass_completion_pct",
+        "interceptions", "progressive_passes", "pass_completion_pct",
         "clearances", "long_pass_pct", "aerial_duel_pct"
     ],
     "Left Back": [
-        "interceptions", "progressive_pass_distance", "recoveries",
+        "interceptions", "progressive_passes", "recoveries",
         "crosses", "take_on_success_pct", "pass_completion_pct"
     ],
     "Defensive Midfielder": [
         "recoveries", "interceptions", "aerial_duel_pct",
-        "pass_completion_pct", "progressive_pass_distance", "long_pass_pct",
+        "pass_completion_pct", "progressive_passes", "long_pass_pct",
         "passes_into_penalty_area", "key_passes"
     ],
     "Midfielder": [
-        "pass_completion_pct", "key_passes",
-        "passes_into_penalty_area", "aerial_duel_pct", "take_on_success_pct",
-        "goal_creating_actions", "shot_creating_actions", "shots_on_target_pct",
-        "carries_into_final_third", "carries_into_penalty_area", "goals", "assists", "xG", "xA"
+        "recoveries", "interceptions", "aerial_duel_pct",
+        "pass_completion_pct", "progressive_passes", "long_pass_pct",
+        "passes_into_penalty_area", "key_passes"
     ],
     "Right Winger": [
         "pass_completion_pct", "key_passes",
@@ -142,7 +141,7 @@ metric_labels = {
     "clearances": "Clearances",
     "crosses": "Crosses",
     "long_pass_pct": "Long Pass %",
-    "progressive_pass_distance": "Progressive Pass Distance",
+    "progressive_passes": "Progressive Pass Distance",
     "progressive_carry_distance": "Progressive Carry Distance",
     "totalSaves": "Saves",
     "claimsHigh": "High Claims",
@@ -181,7 +180,7 @@ metric_type_map = {
     "interceptions": "per_match",
     "clearances": "per_match",
     "crosses": "per_match",
-    "progressive_pass_distance": "per_match",
+    "progressive_passes": "per_match",
     "progressive_carry_distance": "per_match",
     "totalSaves": "per_match",
     "claimsHigh": "per_match",
@@ -216,7 +215,7 @@ metric_tooltip_fields = {
     "passes_into_penalty_area": [],
     "carries_into_final_third": [],
     "carries_into_penalty_area": [],
-    "progressive_pass_distance": [],
+    "progressive_passes": [],
     "progressive_carry_distance": [],
     "totalSaves": [],
     "claimsHigh": [],
@@ -338,7 +337,7 @@ def format_metric_value(value, column):
 
     if metric_type == "percentage":
         return f"{value:.1f}"
-    elif column in ["xG", "xA", "ps_xG", "progressive_pass_distance", "progressive_carry_distance"]:
+    elif column in ["xG", "xA", "ps_xG", "progressive_passes", "progressive_carry_distance"]:
         return f"{value:.2f}"
     else:
         return f"{int(round(value))}"
@@ -1070,7 +1069,7 @@ elif section == "Player Comparison":
     
 
     goals = event_data_top5[event_data_top5['type_displayName'] == 'Goal'].groupby(['playerId', 'matchId']).size().rename('goals')
-    assists = event_data_top5[event_data_top5['value_IntentionalAssist'] == 1].groupby(['playerId', 'matchId']).size().rename('assists')
+    assists = event_data_top5[event_data_top5['value_IntentionalGoalAssist'] == 1].groupby(['playerId', 'matchId']).size().rename('assists')
     crosses = event_data_top5[event_data_top5['value_Cross'] == 1].groupby(['playerId', 'matchId']).size().rename('crosses')
 
     long_passes = event_data_top5[event_data_top5['value_Length'] >= 30]
@@ -1080,7 +1079,7 @@ elif section == "Player Comparison":
 
     progressive_pass_distance = event_data_top5[
         (event_data_top5['type_displayName'] == 'Pass') & (event_data_top5['value_Length'] > 10)
-    ].groupby(['playerId', 'matchId'])['value_Length'].sum().rename('progressive_pass_distance')
+    ].groupby(['playerId', 'matchId'])['value_Length'].sum().rename('progressive_passes')
 
     progressive_carry_distance = event_data_top5[
         (event_data_top5['type_displayName'] == 'Carry') & ((event_data_top5['endX'] - event_data_top5['x']) > 10)
