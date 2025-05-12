@@ -863,13 +863,20 @@ elif section == "Player Comparison":
         "Right Back": ["DR", "DMR"],
         "Defensive Midfielder": ["DMC"],
         "Midfielder": ["MC", "ML", "MR"],
-        "Attacking Midfielder": ["AMC", "AML", "AMR"],
-        "Striker": ["FW", "FWL", "FWR"]
+        "Attacking Midfielder": ["AMC"],
+        "Left Winger": ["AML", "FWL"],
+        "Right Winger": ["AMR", "FWR"],
+        "Striker": ["FW"]
     }
 
     position_codes = reverse_position_map.get(player_position, [])
 
+    if not position_codes:
+        st.error(f"❌ No position codes found for player position: {player_position}")
+        st.stop()
+
     top5_team_ids_str = ','.join(map(str, top_team_ids))
+    position_codes_str = ','.join(f"'{pos}'" for pos in position_codes)
 
     # --- Query Top 5 Players and Player Info ---
     with st.spinner('🔎 Loading Top 5 players and stats...'):
@@ -878,7 +885,7 @@ elif section == "Player Comparison":
             SELECT ps.* FROM player_stats ps
             JOIN player_data pd ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
             JOIN match_data md ON ps.matchId = md.matchId
-            WHERE pd.position IN ({','.join([f"'{pos}'" for pos in position_codes])})
+            WHERE pd.position IN ({position_codes_str})
             AND ps.teamId IN ({top5_team_ids_str})
             AND md.startDate BETWEEN '{start_date}' AND '{end_date}'
         """
