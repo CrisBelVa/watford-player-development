@@ -1,0 +1,4 @@
+username,password,full_name,role
+admin,admin123,Administrator,admin
+trainer1,trainer123,John Trainer,trainer
+analyst1,analyst123,Jane Analyst,analyst

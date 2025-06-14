@@ -21,15 +21,34 @@ from pandas.io.formats.style import Styler
 
 
 # Redirect if not logged in
-if "logged_in" not in st.session_state or not st.session_state.logged_in:
-    st.warning("You must be logged in to view this page.")
+if "logged_in" not in st.session_state or not st.session_state.logged_in or st.session_state.user_type != "player":
+    st.warning("You must be logged in as a player to view this page.")
     st.stop()
 
+# Mostrar información del usuario en el sidebar
+with st.sidebar:
+    st.subheader("Player Info")
+    st.write(f"Name: {st.session_state.player_name}")
+    st.write(f"ID: {st.session_state.player_id}")
+    
+    if st.button("Logout"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
 # Page title
+import os
+
+# Obtener la ruta absoluta al directorio del proyecto
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+IMG_DIR = os.path.join(BASE_DIR, 'img')
+LOGO_PATH = os.path.join(IMG_DIR, 'watford_logo.png')
+
 st.set_page_config(
     page_title="Watford Player Development Hub",
-    page_icon="img/watford_logo.png",  # Favicon
-    layout="wide"
+    page_icon=LOGO_PATH,
+    layout="wide",
+    initial_sidebar_state="expanded"  # Mostrar sidebar para usuarios logueados
 )
 
 # Get player info
@@ -37,8 +56,11 @@ player_id = st.session_state.player_id
 player_name = st.session_state.player_name
 
 # Your dashboard
-logo = Image.open("img/watford_logo.png")
-st.image(logo, width=100)
+try:
+    logo = Image.open(LOGO_PATH)
+    st.image(logo, width=100)
+except FileNotFoundError:
+    st.error("Logo image not found. Please check the image path.")
 st.title(f"{player_name}")
 
 # --- Load Data ---

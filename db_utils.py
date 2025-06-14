@@ -1,11 +1,13 @@
 import pandas as pd
 import numpy as np
-from sqlalchemy import create_engine
-from typing import List, Tuple
+from sqlalchemy import create_engine, text
+from typing import List, Tuple, Dict, Any, Optional, Union
 import streamlit as st
 import altair as alt
 from dotenv import load_dotenv
 import os
+from datetime import datetime, timedelta
+from typing import Dict, Any
 
 def connect_to_db():
     load_dotenv()
@@ -647,6 +649,600 @@ def calculate_logged_player_metrics(metrics_summary, player_id, player_name, tea
         **logged_player_agg
     })
     return logged_player_df
+
+def get_connection():
+    """
+    Establece y devuelve una conexión a la base de datos.
+    
+    Returns:
+        connection: Objeto de conexión a la base de datos
+    """
+    try:
+        engine = connect_to_db()
+        if engine:
+            return engine.connect()
+        return None
+    except Exception as e:
+        print(f"Error al conectar a la base de datos: {e}")
+        return None
+
+
+def insert_entrenamiento(jugador_id: int, fecha: str, objetivo: str, resultado: str, 
+                        duracion_minutos: int, notas: str = None) -> bool:
+    """
+    Inserta un nuevo registro de entrenamiento individual.
+    
+    Args:
+        jugador_id (int): ID del jugador
+        fecha (str): Fecha del entrenamiento en formato 'YYYY-MM-DD'
+        objetivo (str): Objetivo del entrenamiento
+        resultado (str): Resultado del entrenamiento
+        duracion_minutos (int): Duración en minutos
+        notas (str, optional): Notas adicionales
+        
+    Returns:
+        bool: True si la inserción fue exitosa, False en caso contrario
+    """
+    try:
+        engine = connect_to_db()
+        if not engine:
+            return False
+            
+        query = """
+            INSERT INTO entrenamientos_individuales 
+            (jugador_id, fecha, objetivo, resultado, duracion_minutos, notas, created_at)
+            VALUES (:jugador_id, :fecha, :objetivo, :resultado, :duracion_minutos, :notas, NOW())
+        """
+        
+        with engine.connect() as conn:
+            conn.execute(
+                text(query),
+                {
+                    'jugador_id': jugador_id,
+                    'fecha': fecha,
+                    'objetivo': objetivo,
+                    'resultado': resultado,
+                    'duracion_minutos': duracion_minutos,
+                    'notas': notas
+                }
+            )
+            conn.commit()
+            return True
+            
+    except Exception as e:
+        print(f"Error en insert_entrenamiento: {e}")
+        if 'conn' in locals():
+            conn.rollback()
+        return False
+
+
+def insert_meeting(jugador_id: int, fecha: str, tipo: str, titulo: str, 
+                  descripcion: str = None, notas: str = None) -> bool:
+    """
+    Inserta un nuevo registro de reunión.
+    
+    Args:
+        jugador_id (int): ID del jugador
+        fecha (str): Fecha de la reunión en formato 'YYYY-MM-DD'
+        tipo (str): Tipo de reunión (ej. 'Individual', 'Grupal', 'Técnica')
+        titulo (str): Título de la reunión
+        descripcion (str, optional): Descripción detallada
+        notas (str, optional): Notas adicionales
+        
+    Returns:
+        bool: True si la inserción fue exitosa, False en caso contrario
+    """
+    try:
+        engine = connect_to_db()
+        if not engine:
+            return False
+            
+        query = """
+            INSERT INTO meetings 
+            (jugador_id, fecha, tipo, titulo, descripcion, notas, created_at)
+            VALUES (:jugador_id, :fecha, :tipo, :titulo, :descripcion, :notas, NOW())
+        """
+        
+        with engine.connect() as conn:
+            conn.execute(
+                text(query),
+                {
+                    'jugador_id': jugador_id,
+                    'fecha': fecha,
+                    'tipo': tipo,
+                    'titulo': titulo,
+                    'descripcion': descripcion,
+                    'notas': notas
+                }
+            )
+            conn.commit()
+            return True
+            
+    except Exception as e:
+        print(f"Error en insert_meeting: {e}")
+        if 'conn' in locals():
+            conn.rollback()
+        return False
+
+
+def insert_review_clip(jugador_id: int, fecha: str, titulo: str, descripcion: str,
+                      enlace_video: str, duracion_segundos: int,
+                      etiquetas: str = None, notas: str = None) -> bool:
+    """
+    Inserta un nuevo registro de review clip.
+    
+    Args:
+        jugador_id (int): ID del jugador
+        fecha (str): Fecha del clip en formato 'YYYY-MM-DD'
+        titulo (str): Título del clip
+        descripcion (str): Descripción del clip
+        enlace_video (str): URL del video
+        duracion_segundos (int): Duración en segundos
+        etiquetas (str, optional): Etiquetas separadas por comas
+        notas (str, optional): Notas adicionales
+        
+    Returns:
+        bool: True si la inserción fue exitosa, False en caso contrario
+    """
+    try:
+        engine = connect_to_db()
+        if not engine:
+            return False
+            
+        query = """
+            INSERT INTO review_clips 
+            (jugador_id, fecha, titulo, descripcion, enlace_video, 
+             duracion_segundos, etiquetas, notas, created_at)
+            VALUES (:jugador_id, :fecha, :titulo, :descripcion, :enlace_video, 
+                   :duracion_segundos, :etiquetas, :notas, NOW())
+        """
+        
+        with engine.connect() as conn:
+            conn.execute(
+                text(query),
+                {
+                    'jugador_id': jugador_id,
+                    'fecha': fecha,
+                    'titulo': titulo,
+                    'descripcion': descripcion,
+                    'enlace_video': enlace_video,
+                    'duracion_segundos': duracion_segundos,
+                    'etiquetas': etiquetas,
+                    'notas': notas
+                }
+            )
+            conn.commit()
+            return True
+            
+    except Exception as e:
+        print(f"Error en insert_review_clip: {e}")
+        if 'conn' in locals():
+            conn.rollback()
+        return False
+
+
+def get_player_activities(player_id: int, start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Obtiene todas las actividades de un jugador en un rango de fechas.
+    
+    Args:
+        player_id (int): ID del jugador
+        start_date (str): Fecha de inicio en formato 'YYYY-MM-DD'
+        end_date (str): Fecha de fin en formato 'YYYY-MM-DD'
+        
+    Returns:
+        pd.DataFrame: DataFrame con las actividades del jugador
+    """
+    try:
+        engine = connect_to_db()
+        if not engine:
+            return pd.DataFrame()
+            
+        # Consulta para entrenamientos individuales
+        query_entrenamientos = """
+            SELECT 
+                id,
+                jugador_id,
+                fecha,
+                'Entrenamiento' as tipo,
+                objetivo as titulo,
+                resultado as descripcion,
+                NULL as enlace_video,
+                duracion_minutos as duracion,
+                notas,
+                created_at
+            FROM entrenamientos_individuales
+            WHERE jugador_id = :player_id
+            AND fecha BETWEEN :start_date AND :end_date
+        """
+        
+        # Consulta para reuniones
+        query_meetings = """
+            SELECT 
+                id,
+                jugador_id,
+                fecha,
+                CONCAT('Reunión - ', tipo) as tipo,
+                titulo,
+                descripcion,
+                NULL as enlace_video,
+                NULL as duracion,
+                notas,
+                created_at
+            FROM meetings
+            WHERE jugador_id = :player_id
+            AND fecha BETWEEN :start_date AND :end_date
+        """
+        
+        # Consulta para review clips
+        query_review_clips = """
+            SELECT 
+                id,
+                jugador_id,
+                fecha,
+                'Review Clip' as tipo,
+                titulo,
+                descripcion,
+                enlace_video,
+                duracion_segundos as duracion,
+                CONCAT_WS(' | ', notas, CONCAT('Etiquetas: ', etiquetas)) as notas,
+                created_at
+            FROM review_clips
+            WHERE jugador_id = :player_id
+            AND fecha BETWEEN :start_date AND :end_date
+        """
+        
+        params = {
+            'player_id': player_id,
+            'start_date': start_date,
+            'end_date': end_date
+        }
+        
+        with engine.connect() as conn:
+            # Ejecutar consultas y combinar resultados
+            df_entrenamientos = pd.read_sql(text(query_entrenamientos), conn, params=params)
+            df_meetings = pd.read_sql(text(query_meetings), conn, params=params)
+            df_review_clips = pd.read_sql(text(query_review_clips), conn, params=params)
+            
+            # Combinar todos los DataFrames
+            df = pd.concat([df_entrenamientos, df_meetings, df_review_clips], ignore_index=True)
+            
+            # Ordenar por fecha descendente
+            if not df.empty:
+                df['fecha'] = pd.to_datetime(df['fecha'])
+                df = df.sort_values('fecha', ascending=False)
+                
+                # Formatear fechas para mostrar
+                df['fecha_str'] = df['fecha'].dt.strftime('%d/%m/%Y')
+                
+                # Asegurar que las columnas de duración sean consistentes
+                if 'duracion' in df.columns:
+                    df['duracion'] = df['duracion'].fillna(0).astype(int)
+                
+            return df
+            
+    except Exception as e:
+        print(f"Error en get_player_activities: {e}")
+        return pd.DataFrame()
+
+
+def get_active_players() -> pd.DataFrame:
+    """
+    Obtiene la lista de jugadores activos con su información básica.
+    
+    Returns:
+        pd.DataFrame: DataFrame con las columnas [id, nombre, apellido, nombre_completo, posicion, equipo]
+    """
+    try:
+        engine = connect_to_db()
+        if not engine:
+            return pd.DataFrame()
+            
+        query = """
+            SELECT 
+                id,
+                nombre,
+                apellido,
+                CONCAT(nombre, ' ', apellido) as nombre_completo,
+                posicion,
+                equipo
+            FROM jugadores
+            WHERE activo = 1
+            ORDER BY nombre, apellido
+        """
+        
+        with engine.connect() as conn:
+            df = pd.read_sql(text(query), conn)
+            
+        return df
+        
+    except Exception as e:
+        print(f"Error en get_active_players: {e}")
+        return pd.DataFrame()
+
+
+def get_monthly_summary_by_player(month: str) -> pd.DataFrame:
+    """
+    Obtiene un resumen de actividades por jugador para un mes específico.
+    
+    Args:
+        month (str): Mes en formato 'YYYY-MM'
+        
+    Returns:
+        pd.DataFrame: DataFrame con el resumen de actividades por jugador
+    """
+    try:
+        engine = connect_to_db()
+        if not engine:
+            return pd.DataFrame()
+            
+        # Obtener el primer y último día del mes
+        start_date = f"{month}-01"
+        next_month = (datetime.strptime(start_date, '%Y-%m-%d') + timedelta(days=32)).replace(day=1)
+        end_date = (next_month - timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        with engine.connect() as conn:
+            # Obtener resumen de entrenamientos por jugador
+            query = """
+                SELECT 
+                    j.id as jugador_id,
+                    CONCAT(j.nombre, ' ', j.apellido) as jugador,
+                    COUNT(e.id) as entrenamientos
+                FROM jugadores j
+                LEFT JOIN entrenamientos_individuales e ON j.id = e.jugador_id 
+                    AND e.fecha BETWEEN :start_date AND :end_date
+                WHERE j.activo = 1
+                GROUP BY j.id, j.nombre, j.apellido
+            """
+            df_entrenamientos = pd.read_sql(
+                text(query), 
+                conn, 
+                params={'start_date': start_date, 'end_date': end_date}
+            )
+            
+            # Obtener resumen de reuniones por jugador
+            query = """
+                SELECT 
+                    j.id as jugador_id,
+                    CONCAT(j.nombre, ' ', j.apellido) as jugador,
+                    COUNT(m.id) as meetings
+                FROM jugadores j
+                LEFT JOIN meetings m ON j.id = m.jugador_id 
+                    AND m.fecha BETWEEN :start_date AND :end_date
+                WHERE j.activo = 1
+                GROUP BY j.id, j.nombre, j.apellido
+            """
+            df_meetings = pd.read_sql(
+                text(query), 
+                conn, 
+                params={'start_date': start_date, 'end_date': end_date}
+            )
+            
+            # Obtener resumen de review clips por jugador
+            query = """
+                SELECT 
+                    j.id as jugador_id,
+                    CONCAT(j.nombre, ' ', j.apellido) as jugador,
+                    COUNT(rc.id) as review_clips
+                FROM jugadores j
+                LEFT JOIN review_clips rc ON j.id = rc.jugador_id 
+                    AND rc.fecha BETWEEN :start_date AND :end_date
+                WHERE j.activo = 1
+                GROUP BY j.id, j.nombre, j.apellido
+            """
+            df_review_clips = pd.read_sql(
+                text(query), 
+                conn, 
+                params={'start_date': start_date, 'end_date': end_date}
+            )
+            
+            # Combinar todos los DataFrames
+            dfs = [df_entrenamientos, df_meetings, df_review_clips]
+            df_final = None
+            
+            for df in dfs:
+                if not df.empty:
+                    if df_final is None:
+                        df_final = df
+                    else:
+                        df_final = df_final.merge(df, on=['jugador_id', 'jugador'], how='outer')
+            
+            # Si no hay datos, devolver un DataFrame vacío con las columnas esperadas
+            if df_final is None or df_final.empty:
+                return pd.DataFrame(columns=['jugador_id', 'jugador', 'entrenamientos', 'meetings', 'review_clips'])
+                
+            # Rellenar valores nulos con 0
+            df_final = df_final.fillna(0)
+            
+            # Convertir columnas numéricas a enteros
+            for col in ['entrenamientos', 'meetings', 'review_clips']:
+                if col in df_final.columns:
+                    df_final[col] = df_final[col].astype(int)
+            
+            return df_final
+            
+    except Exception as e:
+        print(f"Error en get_monthly_summary_by_player: {e}")
+        return pd.DataFrame()
+
+
+def get_monthly_summary_all_players(months: int = 6) -> pd.DataFrame:
+    """
+    Obtiene un resumen mensual de actividades para todos los jugadores.
+    
+    Args:
+        months (int): Número de meses a incluir en el resumen (por defecto: 6)
+        
+    Returns:
+        pd.DataFrame: DataFrame con el resumen mensual de actividades
+    """
+    try:
+        engine = connect_to_db()
+        if not engine:
+            return pd.DataFrame()
+            
+        # Calcular fecha de inicio (hace 'months' meses)
+        end_date = datetime.now()
+        start_date = (end_date - timedelta(days=months*30)).strftime('%Y-%m-01')
+        end_date = end_date.strftime('%Y-%m-%d')
+        
+        with engine.connect() as conn:
+            # Obtener resumen de entrenamientos por mes
+            query = """
+                SELECT 
+                    DATE_FORMAT(fecha, '%Y-%m-01') as mes,
+                    COUNT(*) as total_entrenamientos
+                FROM entrenamientos_individuales
+                WHERE fecha BETWEEN :start_date AND :end_date
+                GROUP BY DATE_FORMAT(fecha, '%Y-%m-01')
+            """
+            df_entrenamientos = pd.read_sql(
+                text(query), 
+                conn, 
+                params={'start_date': start_date, 'end_date': end_date}
+            )
+            
+            # Obtener resumen de reuniones por mes
+            query = """
+                SELECT 
+                    DATE_FORMAT(fecha, '%Y-%m-01') as mes,
+                    COUNT(*) as total_meetings
+                FROM meetings
+                WHERE fecha BETWEEN :start_date AND :end_date
+                GROUP BY DATE_FORMAT(fecha, '%Y-%m-01')
+            """
+            df_meetings = pd.read_sql(
+                text(query), 
+                conn, 
+                params={'start_date': start_date, 'end_date': end_date}
+            )
+            
+            # Obtener resumen de review clips por mes
+            query = """
+                SELECT 
+                    DATE_FORMAT(fecha, '%Y-%m-01') as mes,
+                    COUNT(*) as total_review_clips
+                FROM review_clips
+                WHERE fecha BETWEEN :start_date AND :end_date
+                GROUP BY DATE_FORMAT(fecha, '%Y-%m-01')
+            """
+            df_review_clips = pd.read_sql(
+                text(query), 
+                conn, 
+                params={'start_date': start_date, 'end_date': end_date}
+            )
+            
+            # Combinar todos los DataFrames
+            dfs = [df_entrenamientos, df_meetings, df_review_clips]
+            df_final = None
+            
+            for df in dfs:
+                if not df.empty:
+                    if df_final is None:
+                        df_final = df
+                    else:
+                        df_final = df_final.merge(df, on='mes', how='outer')
+            
+            # Si no hay datos, devolver un DataFrame vacío con las columnas esperadas
+            if df_final is None or df_final.empty:
+                return pd.DataFrame(columns=['mes', 'total_entrenamientos', 'total_meetings', 'total_review_clips'])
+                
+            # Rellenar valores nulos con 0
+            df_final = df_final.fillna(0)
+            
+            # Ordenar por mes
+            df_final = df_final.sort_values('mes')
+            
+            return df_final
+            
+    except Exception as e:
+        print(f"Error en get_monthly_summary_all_players: {e}")
+        return pd.DataFrame()
+
+
+def get_department_metrics(month: str) -> Dict[str, Any]:
+    """
+    Obtiene las métricas del departamento para un mes específico.
+    
+    Args:
+        month (str): Mes en formato 'YYYY-MM'
+        
+    Returns:
+        dict: Diccionario con las métricas del departamento
+    """
+    try:
+        engine = connect_to_db()
+        if not engine:
+            return {}
+            
+        # Obtener el primer y último día del mes
+        start_date = f"{month}-01"
+        next_month = (datetime.strptime(start_date, '%Y-%m-%d') + timedelta(days=32)).replace(day=1)
+        end_date = (next_month - timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        with engine.connect() as conn:
+            # Contar entrenamientos individuales
+            query = """
+                SELECT COUNT(*) as total 
+                FROM entrenamientos_individuales 
+                WHERE fecha BETWEEN :start_date AND :end_date
+            """
+            entrenamientos = conn.execute(text(query), 
+                                       {'start_date': start_date, 'end_date': end_date}).scalar()
+            
+            # Contar reuniones
+            query = """
+                SELECT COUNT(*) as total 
+                FROM meetings 
+                WHERE fecha BETWEEN :start_date AND :end_date
+            """
+            meetings = conn.execute(text(query), 
+                                  {'start_date': start_date, 'end_date': end_date}).scalar()
+            
+            # Contar review clips
+            query = """
+                SELECT COUNT(*) as total 
+                FROM review_clips 
+                WHERE fecha BETWEEN :start_date AND :end_date
+            """
+            review_clips = conn.execute(text(query), 
+                                      {'start_date': start_date, 'end_date': end_date}).scalar()
+            
+            # Contar jugadores activos (que tuvieron al menos una actividad)
+            query = """
+                SELECT COUNT(DISTINCT jugador_id) as total
+                FROM (
+                    SELECT jugador_id FROM entrenamientos_individuales WHERE fecha BETWEEN :start_date AND :end_date
+                    UNION
+                    SELECT jugador_id FROM meetings WHERE fecha BETWEEN :start_date AND :end_date
+                    UNION
+                    SELECT jugador_id FROM review_clips WHERE fecha BETWEEN :start_date AND :end_date
+                ) as actividades
+            """
+            jugadores_activos = conn.execute(text(query), 
+                                          {'start_date': start_date, 'end_date': end_date}).scalar()
+            
+            # Total de jugadores en el sistema
+            query = "SELECT COUNT(*) as total FROM jugadores WHERE activo = 1"
+            total_jugadores = conn.execute(text(query)).scalar() or 4  # 4 como valor por defecto
+            
+            # Calcular porcentaje de participación
+            porcentaje_participacion = round((jugadores_activos / total_jugadores * 100) if total_jugadores > 0 else 0, 2)
+            
+            return {
+                'total_entrenamientos': int(entrenamientos or 0),
+                'total_meetings': int(meetings or 0),
+                'total_review_clips': int(review_clips or 0),
+                'jugadores_activos': int(jugadores_activos or 0),
+                'total_jugadores_activos': int(total_jugadores or 4),
+                'porcentaje_participacion': porcentaje_participacion,
+                'mes': month
+            }
+            
+    except Exception as e:
+        print(f"Error en get_department_metrics: {e}")
+        return {}
+
 
 def plot_kpi_comparison(combined_metrics_df, metric_keys, metric_labels, player_name):
     st.markdown("### 📊 KPI Comparison")
