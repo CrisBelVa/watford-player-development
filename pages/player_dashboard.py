@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import plotly.express as px
 from io import BytesIO
 import base64
+import os
 from datetime import timedelta
 from PIL import Image
 from db_utils import connect_to_db
@@ -13,33 +14,13 @@ from db_utils import load_player_data
 from db_utils import load_event_data_for_matches
 from db_utils import get_player_position
 from db_utils import process_player_metrics
-from db_utils import get_minutes
+from db_utils import get_minutes, get_active_players
 from math import ceil
-from typing import Tuple
+from typing import Tuple, Dict, Any
 from sqlalchemy import create_engine
 from pandas.io.formats.style import Styler
 
-
-# Redirect if not logged in
-if "logged_in" not in st.session_state or not st.session_state.logged_in or st.session_state.user_type != "player":
-    st.warning("You must be logged in as a player to view this page.")
-    st.stop()
-
-# Mostrar información del usuario en el sidebar
-with st.sidebar:
-    st.subheader("Player Info")
-    st.write(f"Name: {st.session_state.player_name}")
-    st.write(f"ID: {st.session_state.player_id}")
-    
-    if st.button("Logout"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
-
-# Page title
-import os
-
-# Obtener la ruta absoluta al directorio del proyecto
+# Configuración de la página - DEBE SER EL PRIMER COMANDO DE STREAMLIT
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG_DIR = os.path.join(BASE_DIR, 'img')
 LOGO_PATH = os.path.join(IMG_DIR, 'watford_logo.png')
@@ -48,12 +29,93 @@ st.set_page_config(
     page_title="Watford Player Development Hub",
     page_icon=LOGO_PATH,
     layout="wide",
-    initial_sidebar_state="expanded"  # Mostrar sidebar para usuarios logueados
+    initial_sidebar_state="expanded"
 )
 
-# Get player info
-player_id = st.session_state.player_id
-player_name = st.session_state.player_name
+# Verificar autenticación
+if "logged_in" not in st.session_state or not st.session_state.logged_in:
+    st.warning("You must be logged in to view this page.")
+    st.stop()
+
+# Verificar si el usuario es staff o jugador
+is_staff = st.session_state.user_type == "staff"
+
+# Función para cargar la lista de jugadores activos
+def load_players_list() -> Dict[int, Dict[str, Any]]:
+    """Carga la lista de jugadores activos para el menú desplegable."""
+    try:
+        players_df = get_active_players()
+        
+        # Verificar si el DataFrame está vacío
+        if players_df is None or players_df.empty:
+            st.error("No se encontraron jugadores activos.")
+            return {}
+            
+        # Convertir el DataFrame a un diccionario con el formato esperado
+        players_dict = {}
+        for _, row in players_df.iterrows():
+            player_id = row.get('player_id') or row.get('id')  # Ajusta según el nombre de la columna
+            if player_id is not None:
+                players_dict[player_id] = {
+                    'full_name': f"{row.get('nombre', '')} {row.get('apellido', '')}".strip(),
+                    # Agrega aquí otros campos que necesites
+                }
+        
+        if not players_dict:
+            st.error("No se pudieron cargar los datos de los jugadores.")
+            return {}
+            
+        return players_dict
+        
+    except Exception as e:
+        st.error(f"Error al cargar la lista de jugadores: {str(e)}")
+        import traceback
+        st.error(f"Detalles del error: {traceback.format_exc()}")
+        return {}
+
+# Configuración de la barra lateral
+with st.sidebar:
+    st.subheader("User Info")
+    
+    if is_staff:
+        # Mostrar información del staff
+        st.write(f"Staff: {st.session_state.staff_info['full_name']}" if 'staff_info' in st.session_state else "Staff User")
+        
+        # Cargar lista de jugadores para el menú desplegable
+        players = load_players_list()
+        player_list = {f"{v['full_name']} (ID: {k})": k for k, v in players.items() if k is not None}
+        
+        # Seleccionar jugador
+        selected_player = st.selectbox(
+            "Select Player",
+            options=[""] + list(player_list.keys()),
+            index=0
+        )
+        
+        if selected_player:
+            player_id = player_list[selected_player]
+            player_name = selected_player.split(" (ID:")[0]
+        else:
+            st.warning("Please select a player")
+            st.stop()
+    else:
+        # Mostrar información del jugador
+        st.write(f"Player: {st.session_state.player_name}")
+        st.write(f"ID: {st.session_state.player_id}")
+        player_id = st.session_state.player_id
+        player_name = st.session_state.player_name
+    
+    if st.button("Logout"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
+# Si es staff y no se ha seleccionado un jugador, mostrar mensaje
+if is_staff and 'player_id' not in locals():
+    st.warning("Please select a player from the sidebar to view their dashboard.")
+    st.stop()
+
+# Page title
 
 # Your dashboard
 try:
