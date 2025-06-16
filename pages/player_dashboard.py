@@ -7,6 +7,7 @@ import plotly.express as px
 from io import BytesIO
 import base64
 import os
+import datetime
 from datetime import timedelta
 from PIL import Image
 from db_utils import connect_to_db
@@ -64,7 +65,6 @@ def load_players_list() -> Dict[int, Dict[str, Any]]:
         if not players_dict:
             st.error("No se pudieron cargar los datos de los jugadores.")
             return {}
-            
         return players_dict
         
     except Exception as e:
@@ -129,11 +129,12 @@ st.title(f"{player_name}")
 
 match_data, player_data, team_data, player_stats, total_minutes, games_as_starter = load_player_data(player_id, player_name)
 
-# After loading match_data:
-match_ids = player_data["matchId"].unique().tolist()
+# After loading player_data as before
+player_id = str(player_id)
+match_ids = [str(m) for m in player_data["matchId"].unique()]
+team_id = str(player_data["teamId"].iloc[0])  # assuming single team
 
-# Now load event_data:
-event_data = load_event_data_for_matches(player_id, match_ids)
+event_data = load_event_data_for_matches(player_id, match_ids, team_id=team_id)
 
 position_kpi_map = {
     "Goalkeeper": [
@@ -330,25 +331,39 @@ if not selected_kpis:
 # SIDE BAR
 st.sidebar.header("Time Filters")
 
+
+
 def add_match_dates(df, match_data_df):
     """
-    Adds a 'matchDate' column to the DataFrame based on matchId using match_data_df.
-    Returns updated DataFrame and date range.
+    Adds a 'matchDate' column to df based on matchId using match_data_df,
+    handles NaT and fallback for Streamlit compatibility.
+    Returns updated df and valid min/max dates as Python date objects.
     """
-    # Map matchId to startDate
-    match_dates = dict(zip(match_data_df["matchId"], pd.to_datetime(match_data_df["startDate"], errors="coerce")))
+    # Parse match start dates safely
+    match_data_df["startDate"] = pd.to_datetime(match_data_df["startDate"], errors="coerce")
+
+    # Map matchId to parsed startDate
+    match_dates_dict = dict(zip(match_data_df["matchId"], match_data_df["startDate"]))
     
     df = df.copy()
-    df["matchDate"] = df["matchId"].map(match_dates)
+    df["matchDate"] = df["matchId"].map(match_dates_dict)
 
-    # Drop rows where matchDate could not be mapped
+    # Drop rows with missing matchDate
     df = df.dropna(subset=["matchDate"])
 
-    # Get min/max dates
-    min_date = df["matchDate"].min().date()
-    max_date = df["matchDate"].max().date()
+    if df.empty:
+        today = pd.Timestamp.today().date()
+        return df, today, today
+
+    min_date = df["matchDate"].min()
+    max_date = df["matchDate"].max()
+
+    # Ensure Python date objects (not pandas Timestamp)
+    min_date = min_date.date() if pd.notnull(min_date) else pd.Timestamp.today().date()
+    max_date = max_date.date() if pd.notnull(max_date) else pd.Timestamp.today().date()
 
     return df, min_date, max_date
+
 
 # DELTAS
 
@@ -490,25 +505,31 @@ def display_metric_card(col, title, value, filtered_df, full_df, column, color=N
                 unsafe_allow_html=True
             )
 
-# Apply dates ao metrics_summary
+# -- Apply match dates to player metrics
 metrics_summary, min_date, max_date = add_match_dates(metrics_summary, match_data)
 
-# 5 Lat games filter
-last_5_games = metrics_summary.sort_values("matchDate").drop_duplicates("matchId").tail(5)
-default_start_date = last_5_games["matchDate"].min().date()
-default_end_date = last_5_games["matchDate"].max().date()
+# -- Get default range from last 5 games
+if not metrics_summary.empty:
+    last_5_games = metrics_summary.sort_values("matchDate").drop_duplicates("matchId").tail(5)
+    default_start_date = last_5_games["matchDate"].min().date() if pd.notnull(last_5_games["matchDate"].min()) else min_date
+    default_end_date = last_5_games["matchDate"].max().date() if pd.notnull(last_5_games["matchDate"].max()) else max_date
+else:
+    default_start_date = min_date
+    default_end_date = max_date
 
-# Filtros no sidebar
+# -- Date selectors with safe defaults
 start_date = st.sidebar.date_input("Start date", default_start_date, min_value=min_date, max_value=max_date)
 end_date = st.sidebar.date_input("End date", default_end_date, min_value=min_date, max_value=max_date)
 
-# Aplicar filtro de intervalo de datas
-mask = (metrics_summary["matchDate"].dt.date >= start_date) & (metrics_summary["matchDate"].dt.date <= end_date)
+# -- Filter data based on selected date range
+mask = (
+    (metrics_summary["matchDate"].dt.date >= start_date) &
+    (metrics_summary["matchDate"].dt.date <= end_date)
+)
 filtered_df = metrics_summary.loc[mask].sort_values("matchDate")
 
-# KPIs shown are determined by player position
-metric_keys = selected_kpis  # dynamically assigned from position_kpi_map
-
+# -- Dynamically assigned KPIs
+metric_keys = selected_kpis
 
 # --- Native Watford-Styled Section Selector ---
 
@@ -521,23 +542,17 @@ section = st.sidebar.radio(
     key="selected_section"
 )
 
-#Logout Button
-st.sidebar.markdown("---")
-st.sidebar.markdown("<div style='margin-top: 100px;'></div>", unsafe_allow_html=True)
-
-logout_container = st.sidebar.container()
-with logout_container:
-    if st.button("Logout"):
-        st.session_state.logged_in = False
-        st.session_state.pop("player_id", None)
-        st.session_state.pop("player_name", None)
-        st.rerun()
-
-
 # --- Player Info Section (always at top)
 
 # Extract player static details (only once)
-player_info = player_data[player_data["playerId"] == player_id].iloc[0]
+filtered_player_data = player_data[player_data["playerId"] == player_id]
+
+if filtered_player_data.empty:
+    st.error(f"🚨 No player data found for playerId: {player_id}")
+    st.stop()
+else:
+    player_info = filtered_player_data.iloc[0]
+
 age = player_info["age"]
 shirt_number = player_info["shirtNo"]
 height = player_info["height"]
