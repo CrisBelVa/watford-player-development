@@ -91,9 +91,12 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     for all positions, with corrected Save % and Goals Conceded logic.
     """
 
-    import numpy as np
-    import pandas as pd
-    import streamlit as st
+    # Ensure player_id is int for filtering
+    try:
+        player_id = int(player_id)
+    except Exception as e:
+        st.error(f"🚨 player_id conversion to int failed: {e}")
+        return pd.DataFrame()
 
     if player_stats is None or player_stats.empty:
         st.error("🚨 No player stats available for this player.")
@@ -104,7 +107,13 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
         return pd.DataFrame()
 
     # --- Step 1: Filter ---
+    # Convert playerId to int to match player_id type
+    player_stats["playerId"] = player_stats["playerId"].astype(int)
     player_stats = player_stats[player_stats["playerId"] == player_id].copy()
+
+    # For event_data playerId, keep as int or convert to int before filter (depends on original dtype)
+    if event_data["playerId"].dtype != int:
+        event_data["playerId"] = event_data["playerId"].astype(int)
     event_data_player = event_data[
         (event_data["playerId"] == player_id) &
         (event_data["playerName"].str.lower().str.contains(player_name.lower(), na=False))
@@ -219,10 +228,14 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
         ], axis=1).fillna(0).reset_index()
 
 
-    event_metrics = calculate_event_metrics(event_data)
-    
+    event_metrics = calculate_event_metrics(event_data_player)
 
-    # --- Step 4: Merge all data ---
+    # --- Step 4: Ensure consistent data types before merge ---
+    # Keep playerId as int, but convert matchId to str for merging
+    player_stats["matchId"] = player_stats["matchId"].astype(str)
+    event_metrics["matchId"] = event_metrics["matchId"].astype(str)
+
+    # --- Step 5: Merge event and player stats ---
     metrics_summary = pd.merge(player_stats, event_metrics, on=["playerId", "matchId"], how="left").fillna(0)
 
     # --- Step 5: Derived KPIs ---
@@ -253,6 +266,7 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     metrics_summary = metrics_summary.drop_duplicates(subset=["matchId"], keep="last").reset_index(drop=True)
 
     return metrics_summary
+
 
 
 
@@ -305,16 +319,28 @@ def load_player_data(player_id, player_name):
         params=(player_id,)
     )
 
-    match_data = pd.read_sql("SELECT * FROM match_data", engine)
+    # First get the list of match IDs for the player
     player_data = pd.read_sql(
         "SELECT * FROM player_data WHERE playerId = %s",
         con=engine,
         params=(player_id,)
     )
-    team_data = pd.read_sql("SELECT * FROM team_data", engine)
 
     # Prepare minutes played
     player_data = prepare_player_data_with_minutes(player_data)
+
+    # Now filter match_data only for those matches
+    match_ids = player_data["matchId"].unique().tolist()
+    if not match_ids:
+        # No matches found, return empty dataframe with columns from match_data
+        match_data = pd.DataFrame()
+    else:
+        placeholders = ','.join(['%s'] * len(match_ids))
+        query_matches = f"SELECT * FROM match_data WHERE matchId IN ({placeholders})"
+        params = tuple(match_ids)
+        match_data = pd.read_sql(query_matches, con=engine, params=params)
+
+    team_data = pd.read_sql("SELECT * FROM team_data", engine)
 
     # Aggregates
     total_minutes = player_data['minutesPlayed'].sum()
@@ -324,26 +350,40 @@ def load_player_data(player_id, player_name):
 
 
 @st.cache_data(ttl=300)
-def load_event_data_for_matches(player_id, match_ids):
-    """
-    Loads event_data for the given player and match IDs.
-    """
+def load_event_data_for_matches(player_id, match_ids, team_id=None):
     engine = connect_to_db()
+
+    if not isinstance(player_id, str):
+        st.error("🚨 player_id must be a string.")
+        st.stop()
+
+    if not isinstance(match_ids, list) or not all(isinstance(mid, str) for mid in match_ids):
+        st.error("🚨 match_ids must be a list of strings.")
+        st.stop()
 
     if not match_ids:
         return pd.DataFrame()
 
+    placeholders = ",".join(["%s"] * len(match_ids))
+
+    # Basic query
     query = f"""
     SELECT * FROM event_data
-    WHERE playerId = %s
-    AND matchId IN ({','.join(['%s' for _ in match_ids])})
+    WHERE playerId = %s AND matchId IN ({placeholders})
     """
 
-    params = tuple([player_id] + match_ids)  # 🛠️ Fix here
+    params = (player_id, *match_ids)  # <-- note tuple, not list!
+
+    if team_id:
+        query += " AND teamId = %s"
+        params = params + (team_id,)
 
     event_data = pd.read_sql(query, con=engine, params=params)
-
     return event_data
+
+
+
+
 
 @st.cache_data(ttl=3600)
 def get_top5_players_by_position(
