@@ -1893,7 +1893,7 @@ elif page == "📈 Reportes":
                         )
     
     # Contenido del reporte según el tipo seleccionado
-    if tipo_reporte == "Resumen Mensual":
+    if report_type == "Resumen Mensual":
         st.subheader("Resumen Mensual")
         
         # Gráfico de actividades por tipo
