@@ -86,11 +86,14 @@ if not st.session_state.logged_in:
 
     with st.container(border=True):
         # Selector de rol
-        role = st.selectbox("Select Role", ["Player", "Staff"])
+        role = st.selectbox("Select Role", ["Staff", "Player"], index=0)
         
         # Campos de autenticación
-        username = st.text_input("Username" if role == "Staff" else "Player Name")
-        password = st.text_input("Password" if role == "Staff" else "Player ID", type="password")
+        username = st.text_input("Username" if role == "Staff" else "Player Name", 
+                              value="admin" if role == "Staff" else "")
+        password = st.text_input("Password" if role == "Staff" else "Player ID", 
+                              value="admin123" if role == "Staff" else "", 
+                              type="password")
 
         if st.button("Login"):
             if role == "Player":
