@@ -856,7 +856,7 @@ elif section == "Trends Stats":
     # Apply match filter (but don't re-create opponent_label!)
     trends_df = trends_df[trends_df["matchId"].isin(st.session_state.selected_match_ids)]
 
-    # --- Now Plot ---
+    # --- Now Plot with Plotly ---
     for key in metric_keys:
         chart_data = trends_df[["opponent_label", "matchDate", key] + metric_tooltip_fields.get(key, [])].dropna().copy()
 
@@ -864,52 +864,61 @@ elif section == "Trends Stats":
             continue
 
         season_avg = metrics_summary[key].mean()
-
+        
         with st.container(border=True):
             st.markdown(f"**{metric_labels[key]}**")
-
-            # Tooltip list
-            tooltip_fields = [
-                alt.Tooltip("opponent_label:N", title="Match"),
-                alt.Tooltip(f"{key}:Q", title=metric_labels[key], format=".2f")
-            ]
-            for extra_field in metric_tooltip_fields.get(key, []):
-                if extra_field in chart_data.columns:
-                    tooltip_fields.append(
-                        alt.Tooltip(f"{extra_field}:Q", title=extra_field.replace("_", " ").title())
-                    )
-
-            # NEW: Sort opponent_label based on matchDate!
-            sort_order = list(chart_data.sort_values("matchDate")["opponent_label"])
-
-            bar_chart = alt.Chart(chart_data).mark_bar(color="#fcec03").encode(
-                x=alt.X("opponent_label:N", title="Match", sort=sort_order, axis=alt.Axis(labelAngle=-45)),
-                y=alt.Y(f"{key}:Q", title=metric_labels[key]),
-                tooltip=tooltip_fields
+            
+            # Ordenar por fecha
+            chart_data = chart_data.sort_values("matchDate")
+            
+            # Crear gráfico de barras con Plotly
+            fig = px.bar(
+                chart_data,
+                x='opponent_label',
+                y=key,
+                title=f"{metric_labels[key]} por Partido",
+                labels={"opponent_label": "Partido", key: metric_labels[key]},
+                color_discrete_sequence=['#fcec03']
             )
-
-            avg_line = alt.Chart(pd.DataFrame({"y": [season_avg]})).mark_rule(
-                color="red", strokeDash=[4, 4]
-            ).encode(y="y:Q")
-
-            avg_text = alt.Chart(pd.DataFrame({
-                "x": [sort_order[-1]],
-                "y": [season_avg],
-                "label": [f"Avg: {season_avg:.1f}"]
-            })).mark_text(
-                align="left",
-                baseline="bottom",
-                dy=-5,
-                color="red"
-            ).encode(
-                x=alt.X("x:N"),
-                y=alt.Y("y:Q"),
-                text="label:N"
+            
+            # Agregar etiquetas de texto redondeadas
+            fig.update_traces(
+                text=chart_data[key].round(2),
+                textposition='outside'
             )
-
-            chart = (bar_chart + avg_line + avg_text).properties(height=300)
-
-            st.altair_chart(chart, use_container_width=True)
+            
+            # Añadir línea de promedio
+            fig.add_hline(
+                y=season_avg,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f'Promedio: {season_avg:.2f}',
+                annotation_position="top right"
+            )
+            
+            # Mejorar el diseño
+            fig.update_layout(
+                xaxis_tickangle=-45,
+                height=400,
+                showlegend=False,
+                margin=dict(t=50, b=100, l=50, r=50),
+                xaxis=dict(tickmode='array', tickvals=chart_data['opponent_label']),
+                hovermode='x unified'
+            )
+            
+            # Mejorar tooltips
+            hover_text = [f"<b>Partido:</b> {row['opponent_label']}<br>"
+                        f"<b>{metric_labels[key]}:</b> {row[key]:.2f}<br>"
+                        for _, row in chart_data.iterrows()]
+            
+            fig.update_traces(
+                hovertemplate='%{text}<extra></extra>',
+                text=hover_text,
+                textposition='outside'
+            )
+            
+            # Mostrar el gráfico
+            st.plotly_chart(fig, use_container_width=True)
 
 
 
