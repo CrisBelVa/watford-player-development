@@ -9,6 +9,104 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, Any
 
+position_kpi_map = {
+    "Goalkeeper": [
+        "totalSaves", "save_pct", "goals_conceded", "claimsHigh",
+        "collected", "def_actions_outside_box", "ps_xG"
+    ],
+    "Right Back": [
+        "interceptions", "progressive_passes", "recoveries",
+        "crosses", "take_on_success_pct", "pass_completion_pct"
+    ],
+    "Center Back": [
+        "interceptions", "progressive_passes", "pass_completion_pct",
+        "clearances", "long_pass_pct", "aerial_duel_pct"
+    ],
+    "Left Back": [
+        "interceptions", "progressive_passes", "recoveries",
+        "crosses", "take_on_success_pct", "pass_completion_pct"
+    ],
+    "Defensive Midfielder": [
+        "recoveries", "interceptions", "aerial_duel_pct",
+        "pass_completion_pct", "progressive_passes", "long_pass_pct",
+        "passes_into_penalty_area", "key_passes"
+    ],
+    "Midfielder": [
+        "recoveries", "interceptions", "aerial_duel_pct",
+        "pass_completion_pct", "progressive_passes", "long_pass_pct",
+        "passes_into_penalty_area", "key_passes"
+    ],
+    "Right Winger": [
+        "pass_completion_pct", "key_passes",
+        "passes_into_penalty_area", "crosses", "take_on_success_pct",
+        "goal_creating_actions", "shot_creating_actions", "shots_on_target_pct",
+        "carries_into_final_third", "carries_into_penalty_area", "xG", "xA"
+    ],
+    "Attacking Midfielder": [
+        "pass_completion_pct", "key_passes",
+        "passes_into_penalty_area", "aerial_duel_pct", "take_on_success_pct",
+        "goal_creating_actions", "shot_creating_actions", "shots_on_target_pct",
+        "carries_into_final_third", "carries_into_penalty_area", "goals", "assists", "xG", "xA"
+    ],
+    "Left Winger": [
+        "pass_completion_pct", "key_passes",
+        "passes_into_penalty_area", "crosses", "take_on_success_pct",
+        "goal_creating_actions", "shot_creating_actions", "shots_on_target_pct",
+        "carries_into_final_third", "carries_into_penalty_area", "xG", "xA"
+    ],
+    "Striker": [
+        "goals", "assists", "xG", "xA", "pass_completion_pct", "key_passes",
+        "passes_into_penalty_area", "aerial_duel_pct", "take_on_success_pct",
+        "goal_creating_actions", "shot_creating_actions", "shots_on_target_pct",
+        "carries_into_final_third", "carries_into_penalty_area"
+    ]
+}
+
+# Metric type: affects delta logic
+metric_type_map = {
+    "pass_completion_pct": "percentage",
+    "aerial_duel_pct": "percentage",
+    "take_on_success_pct": "percentage",
+    "shots_on_target_pct": "percentage",
+    "long_pass_pct": "percentage",
+    "throwin_accuracy_pct": "percentage",
+    "tackle_success_pct": "percentage",
+    "key_passes": "per_match",
+    "goal_creating_actions": "per_match",
+    "shot_creating_actions": "per_match",
+    "passes_into_penalty_area": "per_match",
+    "carries_into_final_third": "per_match",
+    "carries_into_penalty_area": "per_match",
+    "goals": "per_match",
+    "assists": "per_match",
+    "xG": "per_match",
+    "xA": "per_match",
+    "ps_xG": "per_match",
+    "recoveries": "per_match",
+    "interceptions": "per_match",
+    "clearances": "per_match",
+    "crosses": "per_match",
+    "progressive_passes": "per_match",
+    "progressive_carry_distance": "per_match",
+    "totalSaves": "per_match",
+    "claimsHigh": "per_match",
+    "collected": "per_match",
+    "def_actions_outside_box": "per_match",
+    "shotsBlocked": "per_match",
+    "shotsOffTarget": "per_match",
+    "shotsOnPost": "per_match"
+}
+
+percentage_formula_map = {
+        "pass_completion_pct": ("passesAccurate", "passesTotal"),
+        "aerial_duel_pct": ("aerialsWon", "aerialsTotal"),
+        "take_on_success_pct": ("dribblesWon", "dribblesAttempted"),
+        "shots_on_target_pct": ("shotsOnTarget", "shotsTotal"),
+        "tackle_success_pct": ("tackleSuccessful", "tacklesTotal"),
+        "throwin_accuracy_pct": ("throwInsAccurate", "throwInsTotal"),
+        "long_pass_pct": ("long_passes_success", "long_passes_total"),
+    }
+
 def connect_to_db():
     load_dotenv()
 
@@ -604,7 +702,6 @@ def get_top5_teams(match_data, team_data, start_date, end_date):
         .groupby(["teamId", "teamName"], as_index=False)["points"]
         .sum()
         .sort_values(by="points", ascending=False)
-        .head(5)
     )
 
     return team_points
@@ -1334,3 +1431,143 @@ def plot_kpi_comparison(combined_metrics_df, metric_keys, metric_labels, player_
 
             chart = (bar_chart + avg_line + avg_text).properties(height=300)
             st.altair_chart(chart, use_container_width=True)
+
+
+def process_player_comparison_metrics(stats_df, events_df, player_position):
+    """
+    Calculates summary metrics (KPIs) for multiple players for comparison purposes.
+    Applies the same logic as Overview/Trends Stats, adapted to handle multiple players.
+    """
+
+    # --- Step 0: Ensure correct data types for merging and calculations ---
+    stats_df["playerId"] = stats_df["playerId"].astype(str)
+    stats_df["matchId"] = stats_df["matchId"].astype(str)
+    events_df["playerId"] = events_df["playerId"].astype(str)
+    events_df["matchId"] = events_df["matchId"].astype(str)
+
+    # Clean numeric columns in stats_df
+    metric_cols_stats = stats_df.columns.drop(['playerId', 'playerName', 'matchId', 'teamId', 'teamName'], errors='ignore')
+    for col in metric_cols_stats:
+        stats_df[col] = stats_df[col].astype(str).str.replace(",", ".", regex=False)
+        stats_df[col] = pd.to_numeric(stats_df[col], errors="coerce")
+
+    # Clean numeric columns in events_df
+    numeric_cols_events = [
+        'x', 'y', 'endX', 'endY', 'value_PassEndX', 'value_PassEndY', 
+        'value_Length', 'xG', 'xA', 'ps_xG'
+    ]
+    for col in numeric_cols_events:
+        if col in events_df.columns:
+            events_df[col] = events_df[col].astype(str).str.replace(",", ".", regex=False)
+            events_df[col] = pd.to_numeric(events_df[col], errors="coerce")
+
+    # --- Derived KPIs from stats_df ---
+    stats_df["key_passes"] = stats_df["passesKey"]
+    stats_df["goal_creating_actions"] = stats_df["passesKey"] + stats_df["dribblesWon"]
+    stats_df["shot_creating_actions"] = stats_df["shotsTotal"] + stats_df["passesKey"]
+
+    # --- Event-based metrics ---
+    def_actions_outside = events_df[
+        (events_df["x"] > 25) & events_df["type_displayName"].isin(["Tackle", "Interception", "Clearance"])
+    ].groupby(["playerId", "matchId"]).size().rename("def_actions_outside_box")
+
+    passes_into_pa = events_df[
+        (events_df["value_PassEndX"] >= 94) & events_df["value_PassEndY"].between(21, 79)
+    ].groupby(["playerId", "matchId"]).size().rename("passes_into_penalty_area")
+
+    carries_final_third = events_df[
+        (events_df["x"] < 66.7) & (events_df["endX"] >= 66.7)
+    ].groupby(["playerId", "matchId"]).size().rename("carries_into_final_third")
+
+    carries_pa = events_df[
+        (events_df["endX"] >= 94) & (events_df["endY"].between(21, 79))
+    ].groupby(["playerId", "matchId"]).size().rename("carries_into_penalty_area")
+
+    recoveries = events_df[events_df["type_displayName"] == "BallRecovery"]\
+        .groupby(["playerId", "matchId"]).size().rename("recoveries")
+    interceptions = events_df[events_df["type_displayName"] == "Interception"]\
+        .groupby(["playerId", "matchId"]).size().rename("interceptions")
+    clearances = events_df[events_df["type_displayName"] == "Clearance"]\
+        .groupby(["playerId", "matchId"]).size().rename("clearances")
+    crosses = events_df[events_df["value_Cross"] == 1]\
+        .groupby(["playerId", "matchId"]).size().rename("crosses")
+
+    long_passes_total = events_df[events_df["value_Length"] >= 30]\
+        .groupby(["playerId", "matchId"]).size().rename("long_passes_total")
+
+    long_passes_success = events_df[
+        (events_df["value_Length"] >= 30) & (events_df["outcomeType_displayName"] == "Successful")
+    ].groupby(["playerId", "matchId"]).size().rename("long_passes_success")
+
+    long_pass_pct = (long_passes_success / long_passes_total.replace(0, np.nan) * 100)\
+        .rename("long_pass_pct")
+
+    progressive_passes = events_df[
+        (events_df["type_displayName"] == "Pass") &
+        (events_df["outcomeType_displayName"] == "Successful") &
+        (events_df["value_Length"] >= 9.11) & 
+        (events_df["x"] >= 35) &
+        (~events_df.get("qualifiers", "").astype(str).str.contains("CornerTaken|Freekick", na=False))
+    ].groupby(["playerId", "matchId"]).size().rename("progressive_passes")
+
+    progressive_carry_distance = events_df[
+        (events_df["type_displayName"] == "Carry") & ((events_df["endX"] - events_df["x"]) >= 9.11)
+    ].assign(distance=lambda d: d["endX"] - d["x"])\
+     .groupby(["playerId", "matchId"])["distance"].sum().rename("progressive_carry_distance")
+
+    xG = events_df.groupby(["playerId", "matchId"])["xG"].sum().rename("xG")
+    xA = events_df.groupby(["playerId", "matchId"])["xA"].sum().rename("xA")
+    ps_xG = events_df.groupby(["playerId", "matchId"])["ps_xG"].sum().rename("ps_xG")
+
+    saves = events_df[
+        (events_df["type_displayName"] == "SavedShot") &
+        (events_df["outcomeType_displayName"] == "Successful")
+    ].groupby(["playerId", "matchId"]).size().rename("saves")
+
+    shots_on_target_faced = events_df[
+        (events_df["isShot"] == 1) &
+        (events_df["type_displayName"].isin(["SavedShot", "Goal"]))
+    ].groupby(["playerId", "matchId"]).size().rename("shots_on_target_faced")
+
+    goals_conceded = events_df[
+        (events_df["isShot"] == 1) &
+        (events_df["type_displayName"] == "Goal")
+    ].groupby(["playerId", "matchId"]).size().rename("goals_conceded")
+
+    df_derived = pd.concat([
+        def_actions_outside, passes_into_pa, carries_final_third, carries_pa,
+        recoveries, interceptions, clearances, crosses,
+        long_passes_total, long_passes_success, long_pass_pct,
+        progressive_passes, progressive_carry_distance,
+        xG, xA, ps_xG, saves, shots_on_target_faced, goals_conceded
+    ], axis=1).reset_index().fillna(0)
+
+    df_derived["playerId"] = df_derived["playerId"].astype(str)
+    df_derived["matchId"] = df_derived["matchId"].astype(str)
+
+    df_combined = pd.merge(stats_df, df_derived, on=["playerId", "matchId"], how="left").fillna(0)
+
+    def compute_weighted_pct(df, num_col, denom_col):
+        df = df.copy()
+        df[num_col] = pd.to_numeric(df[num_col], errors='coerce')
+        df[denom_col] = pd.to_numeric(df[denom_col], errors='coerce')
+        total_num = df[num_col].sum()
+        total_denom = df[denom_col].sum()
+        return round((total_num / total_denom) * 100, 1) if total_denom != 0 else 0
+
+    player_rows = []
+    for pid in df_combined["playerId"].unique():
+        sub_df = df_combined[df_combined["playerId"] == pid]
+        row = {"playerId": pid}
+        for kpi in position_kpi_map.get(player_position, []):
+            if kpi in percentage_formula_map:
+                num_col, denom_col = percentage_formula_map[kpi]
+                row[kpi] = compute_weighted_pct(sub_df, num_col, denom_col)
+            elif metric_type_map.get(kpi) == "percentage":
+                row[kpi] = round(sub_df[kpi].mean(), 1)
+            else:
+                row[kpi] = round(sub_df[kpi].sum(), 1)
+        player_rows.append(row)
+
+    summary_df = pd.DataFrame(player_rows)
+    return summary_df
