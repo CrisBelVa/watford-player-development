@@ -8,6 +8,7 @@ import os
 from PIL import Image
 from pathlib import Path
 
+
 # --- Configuración de página ---
 # Obtener la ruta absoluta al directorio del proyecto
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,7 +20,7 @@ st.set_page_config(
     page_title="Watford - Individual Development",
     page_icon=LOGO_PATH,
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # --- Verificación de autenticación ---
@@ -319,27 +320,33 @@ players_summary = get_players_summary()
 
 # --- Sidebar ---
 with st.sidebar:
-    # Logo y título
-    if logo:
-        st.image(logo, width=100)
-    st.title("Desarrollo Individual")
-    
+
+    # Time Filter
+    st.markdown("### Time Filter")
+    fecha_inicio = st.date_input("Start Date", datetime.now() - timedelta(days=30))
+    fecha_fin = st.date_input("End Date", datetime.now())  
+
+
+    st.markdown("---")    
+    st.title("Individual Development")
+      
+
     # Navegación
-    st.markdown("### Navegación")
     page = st.radio(
         "Seleccione una sección:",
-        ["📊 Dashboard General", "👤 Perfil Individual", "📝 Registro Actividades"],
+        ["General Dashboard", "Players Profile", "Files"],
         label_visibility="collapsed"
     )
     
+    
     # Información del usuario
     st.markdown("---")
-    st.markdown("### Información del Usuario")
+    st.markdown("### User Info")
     if "staff_info" in st.session_state:
-        st.write(f"**Nombre:** {st.session_state.staff_info['full_name']}")
-        st.write(f"**Rol:** {st.session_state.staff_info['role']}")
+        st.write(f"**Name:** {st.session_state.staff_info['full_name']}")
+        st.write(f"**Role:** {st.session_state.staff_info['role']}")
     
-    if st.button("Cerrar Sesión", type="primary"):
+    if st.button("Logout", type="primary"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
@@ -347,20 +354,15 @@ with st.sidebar:
 # --- Contenido principal ---
 
 # 1. Dashboard General
-if page == "📊 Dashboard General":
-    st.header("📊 Dashboard General")
+if page == "General Dashboard":
+    # Mostrar logo en la parte superior
+    if logo:
+        st.image(logo, width=100)
+    
+    st.header("General Dashboard")
     
     # Mostrar indicador de carga mientras se obtienen los datos
     with st.spinner('Cargando datos del dashboard...'):
-        # Filtros
-        col1, col2 = st.columns(2)
-        with col1:
-            fecha_inicio = st.date_input("Fecha de inicio", datetime.now() - timedelta(days=30))
-        with col2:
-            fecha_fin = st.date_input("Fecha de fin", datetime.now())
-        
-        # Métricas
-        st.subheader(f"Métricas del Período: {fecha_inicio.strftime('%d/%m/%Y')} - {fecha_fin.strftime('%d/%m/%Y')}")
         
         # Obtener métricas para el rango de fechas seleccionado
         metrics = get_current_month_metrics(fecha_inicio, fecha_fin)
@@ -405,8 +407,7 @@ if page == "📊 Dashboard General":
             """, unsafe_allow_html=True)
         
         # Gráfico de evolución mensual
-        st.subheader(f"Evolución de Actividades ({fecha_inicio.strftime('%d/%m/%Y')} - {fecha_fin.strftime('%d/%m/%Y')})")
-        
+    
         # Obtener resumen mensual para el rango de fechas seleccionado
         monthly_summary = get_monthly_summary(fecha_inicio, fecha_fin)
         
@@ -461,7 +462,7 @@ if page == "📊 Dashboard General":
             st.warning("No hay datos disponibles para mostrar el gráfico de evolución.")
         
         # Resumen por jugador
-        st.subheader(f"Resumen por Jugador ({fecha_inicio.strftime('%d/%m/%Y')} - {fecha_fin.strftime('%d/%m/%Y')})")
+        st.subheader(f"Summary All Players - ({fecha_inicio.strftime('%d/%m/%Y')} - {fecha_fin.strftime('%d/%m/%Y')})")
         
         # Obtener resumen por jugador para el rango de fechas seleccionado
         players_summary = get_players_summary(fecha_inicio, fecha_fin)
@@ -486,7 +487,6 @@ if page == "📊 Dashboard General":
             )
             
             # Gráfico de evolución por jugador
-            st.subheader(f"Evolución de Actividades por Jugador")
             
             # Obtener datos para el gráfico
             df_actividades = load_training_data()
@@ -519,7 +519,7 @@ if page == "📊 Dashboard General":
                 df_agrupado = df_agrupado.sort_values('Mes')
                 
                 # Crear pestañas para cada tipo de actividad
-                tab1, tab2, tab3 = st.tabs(["📊 Entrenamientos", "💬 Meetings", "🎥 Review Clips"])
+                tab1, tab2, tab3 = st.tabs(["Entrenamientos", "Meetings", "Review Clips"])
                 
                 with tab1:
                     fig_entrenamientos = px.line(
@@ -582,15 +582,13 @@ if page == "📊 Dashboard General":
         # Información adicional
         st.markdown("---")
         st.markdown("""
-        **Notas:**
-        - Los datos se actualizan automáticamente cada hora.
-        - Para ver información más detallada, utilice la sección de Reportes.
-        - Contacte con el administrador si necesita ayuda o detecta algún error.
+        **Notes:**
+        - If no data displayed check time filters or Upload the File to display the data.
         """)
 
 # 2. Perfil Individual
-elif page == "👤 Perfil Individual":
-    st.header("👤 Perfil Individual")
+elif page == "Players Profile":
+    st.header("Players Profile")
     
     # Obtener lista de jugadores activos
     @st.cache_data(ttl=3600)  # Cachear por 1 hora
@@ -611,7 +609,7 @@ elif page == "👤 Perfil Individual":
     
     # Obtener actividades del jugador
     @st.cache_data(ttl=600)  # Cachear por 10 minutos
-    def load_player_activities(player_id, start_date, end_date):
+    def load_player_activities(player_id):
         try:
             # Cargar datos de entrenamiento
             df = load_training_data()
@@ -625,15 +623,15 @@ elif page == "👤 Perfil Individual":
             if not jugador_nombre:
                 return pd.DataFrame()
             
-            # Filtrar por jugador y rango de fechas
-            start_date = pd.to_datetime(start_date)
-            end_date = pd.to_datetime(end_date)
+            # Convertir las fechas del sidebar a pandas datetime
+            fecha_inicio_dt = pd.to_datetime(fecha_inicio)
+            fecha_fin_dt = pd.to_datetime(fecha_fin)
             
-            # Filtrar actividades del jugador en el rango de fechas
+            # Filtrar por jugador usando el filtro de fechas del sidebar
             actividades = df[
                 (df['Player'] == jugador_nombre) &
-                (df['Date'] >= start_date) &
-                (df['Date'] <= end_date)
+                (df['Date'] >= fecha_inicio_dt) &
+                (df['Date'] <= fecha_fin_dt)
             ].copy()
             
             if actividades.empty:
@@ -691,72 +689,166 @@ elif page == "👤 Perfil Individual":
         st.warning("No se encontraron jugadores activos en los datos de entrenamiento.")
         st.stop()
     
-    # Selector de jugador
-    jugador_id = st.selectbox(
-        "Seleccionar Jugador",
-        options=list(jugadores.keys()),
-        format_func=lambda x: jugadores[x],
-        index=0
+    # Selector de jugador principal
+    with st.expander("Player", expanded=True):
+        jugador_id = st.selectbox(
+            "Select Player",
+            options=list(jugadores.keys()),
+            format_func=lambda x: jugadores[x],
+            index=0
+        )
+        jugador_seleccionado = jugadores[jugador_id]
+
+    # Selector para comparar jugadores
+    with st.expander("Compare with other players", expanded=False):
+        jugadores_comparar = st.multiselect(
+            "Select players",
+            options=list(jugadores.keys()),
+            format_func=lambda x: jugadores[x],
+            default=[list(jugadores.keys())[0]]  # Por defecto el primer jugador
+        )
+        jugadores_comparar = [jugadores[jugador_id] for jugador_id in jugadores_comparar]
+
+
+    st.subheader("Summary Activities – Compared Players")
+
+    # Load full training data
+    df_all = load_training_data()
+
+    # Combine main player and comparison players
+    all_selected_players = [jugador_seleccionado] + [
+        p for p in jugadores_comparar if p != jugador_seleccionado
+    ]
+
+    # Filter by selected players and date range
+    df_filtered = df_all[
+        (df_all["Player"].isin(all_selected_players)) &
+        (df_all["Date"] >= pd.to_datetime(fecha_inicio)) &
+        (df_all["Date"] <= pd.to_datetime(fecha_fin))
+    ]
+
+    # Aggregate activity counts
+    summary = df_filtered.groupby("Player").agg(
+        Entrenamientos=pd.NamedAgg(column="Training_Type", aggfunc=lambda x: x.notna().sum()),
+        Meetings=pd.NamedAgg(column="Meeting", aggfunc=lambda x: x.notna().sum()),
+        Review_Clips=pd.NamedAgg(column="Review_Clips", aggfunc=lambda x: x.notna().sum())
+    ).reset_index()
+
+    # Add total column
+    summary["Total Actividades"] = summary[["Entrenamientos", "Meetings", "Review_Clips"]].sum(axis=1)
+
+    # Reorder rows: main player first
+    summary = pd.concat([
+        summary[summary["Player"] == jugador_seleccionado],
+        summary[summary["Player"] != jugador_seleccionado]
+    ], ignore_index=True)
+
+    # Highlight the main player
+    def highlight_main_player(row):
+        if row["Player"] == jugador_seleccionado:
+            return ['background-color: #fcec03; font-weight: bold'] * len(row)
+        return [''] * len(row)
+
+   # Display styled dataframe
+    st.dataframe(
+        summary.style.apply(highlight_main_player, axis=1),
+        use_container_width=True
     )
-    jugador_seleccionado = jugadores[jugador_id]
-    
-    # Filtros de fecha (últimos 90 días por defecto)
-    fecha_fin = datetime.now()
-    fecha_inicio = fecha_fin - timedelta(days=90)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        fecha_inicio = st.date_input("Fecha de inicio", fecha_inicio)
-    with col2:
-        fecha_fin = st.date_input("Fecha de fin", fecha_fin)
-    
-    # Validar fechas
-    if fecha_inicio > fecha_fin:
-        st.error("La fecha de inicio no puede ser posterior a la fecha de fin")
-        st.stop()
-    
-    # Cargar actividades del jugador
+
+    # --- Create grouped bar chart per player ---
+    fig = go.Figure()
+
+    # Entrenamientos
+    fig.add_trace(go.Bar(
+        x=summary["Player"],
+        y=summary["Entrenamientos"],
+        name="Entrenamientos",
+        marker_color=[
+            "#fcec03" if player == jugador_seleccionado else "#d3d3d3"
+            for player in summary["Player"]
+        ],
+        hovertemplate="%{y} entrenamientos<extra></extra>"
+    ))
+
+    # Meetings
+    fig.add_trace(go.Bar(
+        x=summary["Player"],
+        y=summary["Meetings"],
+        name="Meetings",
+        marker_color="#ff6b6b",
+        hovertemplate="%{y} meetings<extra></extra>"
+    ))
+
+    # Review Clips
+    fig.add_trace(go.Bar(
+        x=summary["Player"],
+        y=summary["Review_Clips"],
+        name="Review Clips",
+        marker_color="#4ecdc4",
+        hovertemplate="%{y} review clips<extra></extra>"
+    ))
+
+    # Layout tweaks
+    fig.update_layout(
+        barmode="group",
+        xaxis_title="Jugador",
+        yaxis_title="Cantidad de Actividades",
+        legend_title="Tipo",
+        plot_bgcolor="white",
+        title="Actividades por Jugador",
+        margin=dict(l=20, r=20, t=40, b=20),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- Load individual activities for selected player ---
     with st.spinner('Cargando datos del jugador...'):
-        df_actividades = load_player_activities(jugador_id, fecha_inicio, fecha_fin)
+        df_actividades = load_player_activities(jugador_id)
         
-        # Obtener información del jugador seleccionado
         jugador_info = next((v for k, v in jugadores.items() if k == jugador_id), "")
         
-        # Mostrar información del jugador
-        st.subheader("Información del Jugador")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Nombre", jugador_info)
-        with col2:
-            # Obtener posición del jugador (asumiendo que está en la base de datos)
-            st.metric("Posición", "No especificada")  # Se puede mejorar con datos reales
-        with col3:
-            st.metric("Equipo", "Watford FC")  # Se puede mejorar con datos reales
-        
-        # Calcular métricas
-        total_entrenamientos = 0
-        total_meetings = 0
-        total_review_clips = 0
-        
+        st.subheader(f"Individual Activities - {jugador_info}")
+
         if not df_actividades.empty:
-            total_entrenamientos = len(df_actividades[df_actividades['tipo'] == 'Entrenamiento'])
-            total_meetings = len(df_actividades[df_actividades['tipo'] == 'Meeting'])
-            total_review_clips = len(df_actividades[df_actividades['tipo'] == 'Review Clip'])
-        
-        total_actividades = total_entrenamientos + total_meetings + total_review_clips
-        
-        # Mostrar métricas
-        st.subheader("Métricas del Período")
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Entrenamientos", total_entrenamientos)
-        with col2:
-            st.metric("Meetings", total_meetings)
-        with col3:
-            st.metric("Review Clips", total_review_clips)
-        with col4:
-            st.metric("Total Actividades", total_actividades)
-        
+            tipos_disponibles = df_actividades["tipo"].unique().tolist()
+            tipos_seleccionados = st.multiselect(
+                "Select Activities",
+                options=tipos_disponibles,
+                default=tipos_disponibles,
+                key="filtro_tipo_actividades"
+            )
+
+            df_filtrado = df_actividades[df_actividades["tipo"].isin(tipos_seleccionados)]
+
+            if not df_filtrado.empty:
+                df_mostrar = df_filtrado.copy()
+                df_mostrar["fecha"] = df_mostrar["fecha"].dt.strftime("%d/%m/%Y")
+                df_mostrar = df_mostrar[["fecha", "tipo", "subtipo", "descripcion"]]
+
+                st.dataframe(
+                    df_mostrar,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "fecha": "Fecha",
+                        "tipo": "Tipo de Actividad",
+                        "subtipo": "Detalle",
+                        "descripcion": "Descripción"
+                    }
+                )
+            else:
+                st.info("No hay actividades del tipo seleccionado.")
+        else:
+            st.info("No hay actividades registradas para este jugador.")
+
+
         # Timeline de actividades
         st.subheader(f"Timeline de Actividades - {jugador_info}")
         
@@ -782,7 +874,7 @@ elif page == "👤 Perfil Individual":
                 size=[1] * len(df_actividades),  # Tamaño fijo para todos los puntos
                 hover_data=hover_columns if hover_columns else None,
                 labels={'fecha': 'Fecha', 'tipo': 'Tipo de Actividad'},
-                title=f"Actividades de {jugador_info} ({fecha_inicio.strftime('%d/%m/%Y')} - {fecha_fin.strftime('%d/%m/%Y')})"
+                title=f"({fecha_inicio.strftime('%d/%m/%Y')} - {fecha_fin.strftime('%d/%m/%Y')})"
             )
             
             fig.update_layout(
@@ -797,71 +889,10 @@ elif page == "👤 Perfil Individual":
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # Lista de actividades con filtros
-            st.subheader("Lista de Actividades")
-            
-            # Filtro por tipo de actividad
-            tipos_disponibles = df_actividades['tipo'].unique().tolist()
-            tipos_seleccionados = st.multiselect(
-                "Filtrar por tipo de actividad",
-                options=tipos_disponibles,
-                default=tipos_disponibles,
-                key=f"filtro_tipo_{jugador_id}"
-            )
-            
-            # Aplicar filtros
-            actividades_filtradas = df_actividades[df_actividades['tipo'].isin(tipos_seleccionados)]
-            
-            if not actividades_filtradas.empty:
-                # Ordenar por fecha descendente
-                actividades_filtradas = actividades_filtradas.sort_values('fecha', ascending=False)
-                
-                # Mostrar cada actividad en un expander
-                for _, actividad in actividades_filtradas.iterrows():
-                    # Crear título del expander con información disponible
-                    titulo_expander = f"{actividad['tipo']} - {actividad['fecha'].strftime('%d/%m/%Y %H:%M')}"
-                    
-                    # Agregar información adicional si está disponible
-                    if 'subtipo' in actividad and pd.notna(actividad['subtipo']):
-                        titulo_expander += f" - {actividad['subtipo']}"
-                    elif 'descripcion' in actividad and pd.notna(actividad['descripcion']) and len(actividad['descripcion']) > 0:
-                        # Usar los primeros 30 caracteres de la descripción si no hay subtítulo
-                        desc = (actividad['descripcion'][:30] + '...') if len(actividad['descripcion']) > 30 else actividad['descripcion']
-                        titulo_expander += f" - {desc}"
-                    
-                    with st.expander(titulo_expander):
-                        # Mostrar información específica según el tipo de actividad
-                        st.write(f"**Tipo:** {actividad['tipo']}")
-                        st.write(f"**Fecha y hora:** {actividad['fecha'].strftime('%d/%m/%Y %H:%M')}")
-                        
-                        if 'descripcion' in actividad and pd.notna(actividad['descripcion']):
-                            st.write(f"**Descripción:** {actividad['descripcion']}")
-                            
-                        if actividad['tipo'] == 'Entrenamiento':
-                            st.write(f"**Duración:** {actividad.get('duracion_minutos', 'N/A')} minutos")
-                            st.write(f"**Objetivo:** {actividad.get('objetivo', 'No especificado')}")
-                            st.write(f"**Resultado:** {actividad.get('resultado', 'No especificado')}")
-                        elif actividad['tipo'] == 'Meeting':
-                            st.write(f"**Tipo de reunión:** {actividad.get('tipo_reunion', 'No especificado')}")
-                            st.write(f"**Duración:** {actividad.get('duracion_minutos', 'N/A')} minutos")
-                        elif actividad['tipo'] == 'Review Clip':
-                            st.write(f"**Duración:** {actividad.get('duracion_segundos', 'N/A')} segundos")
-                            if 'enlace_video' in actividad and actividad['enlace_video']:
-                                st.write(f"**Enlace:** [{actividad['enlace_video']}]({actividad['enlace_video']})")
-                        
-                        # Mostrar notas si existen
-                        if 'notas' in actividad and actividad['notas'] and pd.notna(actividad['notas']):
-                            st.markdown("---")
-                            st.write("**Notas:**")
-                            st.write(actividad['notas'])
-            else:
-                st.info("No hay actividades que coincidan con los filtros seleccionados.")
-        else:
-            st.info("No hay actividades registradas para este jugador en el período seleccionado.")
 
 # 3. Registro de Actividades
-elif page == "📝 Registro Actividades":
-    st.header("📝 Registro de Actividades")
+elif page == "Files":
+    st.header("Files")
     st.write("Registra nuevas actividades de desarrollo individual para los jugadores.")
     
     

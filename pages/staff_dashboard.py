@@ -31,7 +31,7 @@ except FileNotFoundError:
 st.title("Watford Staff Dashboard")
 
 # Navegación
-page_options = ["🏠 Dashboard", "🎯 Individual Development"]
+page_options = ["Dashboard", "Individual Development"]
 
 # Mostrar información del usuario en el sidebar
 with st.sidebar:
@@ -56,9 +56,8 @@ with st.sidebar:
             st.rerun()
 
 # Redirigir a individual_development si se selecciona esa opción
-if page_option == "🎯 Individual Development":
+if page_option == "Individual Development":
     st.switch_page("pages/individual_development.py")
 
 # Contenido principal del dashboard
-st.header("Welcome to Staff Dashboard")
 st.write("This is the staff dashboard where you can manage player development, view analytics, and more.")
