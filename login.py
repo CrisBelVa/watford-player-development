@@ -34,14 +34,8 @@ def load_watford_players():
 @st.cache_data(ttl=600)
 def load_staff_users():
     if not os.path.exists('staff_users.csv'):
-        # Create default staff users file if it doesn't exist
-        default_staff = pd.DataFrame({
-            'username': ['admin'],
-            'password': ['admin123'],
-            'full_name': ['Administrator'],
-            'role': ['admin']
-        })
-        default_staff.to_csv('staff_users.csv', index=False)
+        # Create empty staff users file if it doesn't exist
+        pd.DataFrame(columns=['username', 'password', 'full_name', 'role']).to_csv('staff_users.csv', index=False)
     return pd.read_csv('staff_users.csv')
 
 def validate_staff_login(username, password):
@@ -86,14 +80,11 @@ if not st.session_state.logged_in:
 
     with st.container(border=True):
         # Selector de rol
-        role = st.selectbox("Select Role", ["Staff", "Player"], index=0)
+        role = st.selectbox("Select Role", ["Player", "Staff"])
         
         # Campos de autenticación
-        username = st.text_input("Username" if role == "Staff" else "Player Name", 
-                              value="admin" if role == "Staff" else "")
-        password = st.text_input("Password" if role == "Staff" else "Player ID", 
-                              value="admin123" if role == "Staff" else "", 
-                              type="password")
+        username = st.text_input("Username" if role == "Staff" else "Player Name")
+        password = st.text_input("Password" if role == "Staff" else "Player ID", type="password")
 
         if st.button("Login"):
             if role == "Player":

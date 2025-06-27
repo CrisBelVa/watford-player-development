@@ -9,3 +9,5 @@ sqlalchemy
 pymysql
 mysql-connector-python
 python-dotenv
+pdfkit
+wkhtmltopdf
