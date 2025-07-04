@@ -10,13 +10,8 @@ import os
 import datetime
 from datetime import timedelta
 from PIL import Image
-from db_utils import connect_to_db
-from db_utils import load_player_data
-from db_utils import load_event_data_for_matches
-from db_utils import get_player_position
-from db_utils import process_player_metrics
-from db_utils import process_player_comparison_metrics
-from db_utils import get_minutes, get_active_players
+from db_utils import connect_to_db, load_player_data, load_event_data_for_matches, get_player_position, process_player_metrics
+from db_utils import process_player_comparison_metrics, get_active_players
 from math import ceil
 from typing import Tuple, Dict, Any
 from sqlalchemy import create_engine
@@ -130,12 +125,27 @@ st.title(f"{player_name}")
 
 match_data, player_data, team_data, player_stats, total_minutes, games_as_starter = load_player_data(player_id, player_name)
 
+if player_data is None:
+    st.error("Failed to load player data. Please check the database connection and ensure the required views/tables exist.")
+    st.stop()
+
 # After loading player_data as before
 player_id = str(player_id)
-match_ids = [str(m) for m in player_data["matchId"].unique()]
-team_id = str(player_data["teamId"].iloc[0])  # assuming single team
 
-event_data = load_event_data_for_matches(player_id, match_ids, team_id=team_id)
+try:
+    match_ids = [str(m) for m in player_data["matchId"].unique()]
+    team_id = str(player_data["teamId"].iloc[0])  # assuming single team
+except (KeyError, IndexError) as e:
+    st.error(f"Error processing player data: {str(e)}")
+    st.error("This might be due to missing columns in the data or empty data.")
+    st.stop()
+
+try:
+    event_data = load_event_data_for_matches(player_id, match_ids, team_id=team_id)
+except Exception as e:
+    st.error(f"Error loading event data: {str(e)}")
+    st.stop()
+
 
 position_kpi_map = {
     "Goalkeeper": [
@@ -923,10 +933,9 @@ elif section == "Player Comparison":
 
     # Load all Championship matches for the selected season
     season_matches = pd.read_sql(
-        "SELECT * FROM match_data WHERE season = %s AND competition = 'Championship'",
-        con=engine,
-        params=(selected_season,)
-    )
+    "SELECT * FROM vw_championship_match_data",
+    con=engine
+)
 
     # Preprocess scores
     score_split = season_matches["score"].str.replace(" ", "", regex=False).str.split(":", expand=True)
@@ -1037,59 +1046,44 @@ elif section == "Player Comparison":
 
         query = f"""
             SELECT 
-                ps.playerId, ps.playerName, pd.age, pd.shirtNo, pd.height, pd.weight, ps.teamId,
+                ps.playerId,
+                ps.playerName,
+                pd.age,
+                pd.shirtNo,
+                pd.height,
+                pd.weight,
+                ps.teamId,
                 td.teamName,
                 pd.isFirstEleven,
                 ps.matchId,
                 md.startDate
-            FROM player_stats ps
-            JOIN player_data pd ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
-            JOIN match_data md ON ps.matchId = md.matchId
-            JOIN team_data td ON ps.teamId = td.teamId AND ps.matchId = td.matchId
+            FROM vw_championship_player_stats ps
+            JOIN vw_championship_player_data pd 
+                ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
+            JOIN vw_championship_match_data md 
+                ON ps.matchId = md.matchId
+            JOIN vw_championship_team_data td 
+                ON ps.teamId = td.teamId AND ps.matchId = td.matchId
             WHERE pd.position IN ({','.join([f"'{pos}'" for pos in position_codes])})
             AND ps.teamId IN ({selected_team_ids_str})
-            AND md.season = '{selected_season}'
-            AND md.competition = 'Championship'
         """
         players_full = pd.read_sql(query, connect_to_db())
+
 
         if players_full.empty:
             st.warning("No players found for this position and selected teams.")
         else:
-            # ✅ STEP 1: Define minutes_df from player_data
+            # Calculate minutesPlayed from your function or external join
             minutes_df = player_data[["playerId", "matchId", "minutesPlayed"]].copy()
-
-            # ✅ STEP 2: Add startDate to minutes_df via match_data
-            minutes_df = pd.merge(
-                minutes_df,
-                match_data[["matchId", "startDate"]],
-                on="matchId",
-                how="left"
-            )
-
-            # ✅ STEP 3: Filter minutes_df by sidebar date range
-            minutes_df["startDate"] = pd.to_datetime(minutes_df["startDate"], errors="coerce")
-            minutes_df = minutes_df[
-                (minutes_df["startDate"].dt.date >= start_date) &
-                (minutes_df["startDate"].dt.date <= end_date)
-            ].copy()
-
-            # ✅ STEP 4: Drop startDate column
-            minutes_df.drop(columns=["startDate"], inplace=True)
-
-            # ✅ STEP 5: Fix dtypes for merge
+            # --- Fix dtypes ---
             players_full["playerId"] = players_full["playerId"].astype(str)
             players_full["matchId"] = players_full["matchId"].astype(str)
             minutes_df["playerId"] = minutes_df["playerId"].astype(str)
             minutes_df["matchId"] = minutes_df["matchId"].astype(str)
 
-            # ✅ STEP 6: Merge minutes into players_full
             players_full = pd.merge(players_full, minutes_df, on=["playerId", "matchId"], how="left")
 
-            # ✅ STEP 7: Remove accidental duplication
-            players_full = players_full.drop_duplicates(subset=["playerId", "matchId"])
-
-            # ✅ STEP 8: Convert startDate in players_full for downstream filtering
+            # Convert startDate before filtering
             players_full["startDate"] = pd.to_datetime(players_full["startDate"], errors="coerce")
 
             # Build player selector BEFORE filtering
@@ -1101,7 +1095,7 @@ elif section == "Player Comparison":
                 .sort_values(ascending=False)
                 .head(5)
                 .index.tolist()
-            )
+    )
 
             with st.expander("Filter Players by Position", expanded=False):
                 selected_players = st.multiselect("Select players to compare", player_options, default=top_players)
@@ -1189,14 +1183,14 @@ elif section == "Player Comparison":
     match_placeholders = ','.join(['%s'] * len(match_ids))
 
     query_stats = f"""
-        SELECT * FROM player_stats
+        SELECT * FROM vw_championship_player_stats
         WHERE playerId IN ({player_placeholders})
         AND matchId IN ({match_placeholders})
     """
     stats_df = pd.read_sql(query_stats, con=connect_to_db(), params=tuple(player_ids + match_ids))
 
     query_events = f"""
-        SELECT * FROM event_data
+        SELECT * FROM vw_championship_event_data
         WHERE playerId IN ({player_placeholders})
         AND matchId IN ({match_placeholders})
     """
