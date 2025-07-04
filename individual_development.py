@@ -896,6 +896,20 @@ elif page == "Files":
     st.write("Registra nuevas actividades de desarrollo individual para los jugadores.")
     
     
+    # Show download button for the dashboard data file
+    data_dir = Path(BASE_DIR) / 'data'
+    dashboard_file_path = data_dir / 'Individuals - Training.xlsx'
+    
+    if dashboard_file_path.exists():
+        with open(dashboard_file_path, "rb") as f:
+            st.download_button(
+                label="📥 Descargar archivo de datos actual",
+                data=f,
+                file_name="Individuals - Training.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+
     # Función para validar y cargar el archivo Excel específico
     def validar_importar_excel(file_path):
         try:
@@ -1144,7 +1158,7 @@ elif page == "Files":
             return False, mensaje_error
     
     # Sección para importar datos desde Excel
-    with st.expander("📤 Importar Datos desde Excel", expanded=True):
+    with st.expander("📤 Importar Datos desde Excel", expanded=False):
         st.markdown("### Instrucciones para la importación")
         st.markdown("""
         1. **Formato del archivo**: El archivo Excel debe tener la siguiente estructura:

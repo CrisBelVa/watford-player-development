@@ -10,13 +10,8 @@ import os
 import datetime
 from datetime import timedelta
 from PIL import Image
-from db_utils import connect_to_db
-from db_utils import load_player_data
-from db_utils import load_event_data_for_matches
-from db_utils import get_player_position
-from db_utils import process_player_metrics
-from db_utils import process_player_comparison_metrics
-from db_utils import get_minutes, get_active_players
+from db_utils import connect_to_db, load_player_data, load_event_data_for_matches, get_player_position, process_player_metrics
+from db_utils import process_player_comparison_metrics, get_active_players
 from math import ceil
 from typing import Tuple, Dict, Any
 from sqlalchemy import create_engine
@@ -130,12 +125,27 @@ st.title(f"{player_name}")
 
 match_data, player_data, team_data, player_stats, total_minutes, games_as_starter = load_player_data(player_id, player_name)
 
+if player_data is None:
+    st.error("Failed to load player data. Please check the database connection and ensure the required views/tables exist.")
+    st.stop()
+
 # After loading player_data as before
 player_id = str(player_id)
-match_ids = [str(m) for m in player_data["matchId"].unique()]
-team_id = str(player_data["teamId"].iloc[0])  # assuming single team
 
-event_data = load_event_data_for_matches(player_id, match_ids, team_id=team_id)
+try:
+    match_ids = [str(m) for m in player_data["matchId"].unique()]
+    team_id = str(player_data["teamId"].iloc[0])  # assuming single team
+except (KeyError, IndexError) as e:
+    st.error(f"Error processing player data: {str(e)}")
+    st.error("This might be due to missing columns in the data or empty data.")
+    st.stop()
+
+try:
+    event_data = load_event_data_for_matches(player_id, match_ids, team_id=team_id)
+except Exception as e:
+    st.error(f"Error loading event data: {str(e)}")
+    st.stop()
+
 
 position_kpi_map = {
     "Goalkeeper": [
@@ -923,10 +933,9 @@ elif section == "Player Comparison":
 
     # Load all Championship matches for the selected season
     season_matches = pd.read_sql(
-        "SELECT * FROM match_data WHERE season = %s AND competition = 'Championship'",
-        con=engine,
-        params=(selected_season,)
-    )
+    "SELECT * FROM vw_championship_match_data",
+    con=engine
+)
 
     # Preprocess scores
     score_split = season_matches["score"].str.replace(" ", "", regex=False).str.split(":", expand=True)
@@ -1037,21 +1046,29 @@ elif section == "Player Comparison":
 
         query = f"""
             SELECT 
-                ps.playerId, ps.playerName, pd.age, pd.shirtNo, pd.height, pd.weight, ps.teamId,
+                ps.playerId,
+                ps.playerName,
+                pd.age,
+                pd.shirtNo,
+                pd.height,
+                pd.weight,
+                ps.teamId,
                 td.teamName,
                 pd.isFirstEleven,
                 ps.matchId,
                 md.startDate
-            FROM player_stats ps
-            JOIN player_data pd ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
-            JOIN match_data md ON ps.matchId = md.matchId
-            JOIN team_data td ON ps.teamId = td.teamId AND ps.matchId = td.matchId
+            FROM vw_championship_player_stats ps
+            JOIN vw_championship_player_data pd 
+                ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
+            JOIN vw_championship_match_data md 
+                ON ps.matchId = md.matchId
+            JOIN vw_championship_team_data td 
+                ON ps.teamId = td.teamId AND ps.matchId = td.matchId
             WHERE pd.position IN ({','.join([f"'{pos}'" for pos in position_codes])})
             AND ps.teamId IN ({selected_team_ids_str})
-            AND md.season = '{selected_season}'
-            AND md.competition = 'Championship'
         """
         players_full = pd.read_sql(query, connect_to_db())
+
 
         if players_full.empty:
             st.warning("No players found for this position and selected teams.")
@@ -1072,10 +1089,16 @@ elif section == "Player Comparison":
             # Build player selector BEFORE filtering
             all_player_names = players_full[["playerId", "playerName"]].drop_duplicates().sort_values("playerName")
             player_options = all_player_names["playerName"].tolist()
-            default_players = player_options[:5]
+            top_players = (
+                players_full.groupby("playerName")["minutesPlayed"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(5)
+                .index.tolist()
+    )
 
-            with st.expander("🎯 Filter Players by Position", expanded=False):
-                selected_players = st.multiselect("Select players to compare", player_options, default=default_players)
+            with st.expander("Filter Players by Position", expanded=False):
+                selected_players = st.multiselect("Select players to compare", player_options, default=top_players)
 
             # Now filter selected players
             selected_player_ids = all_player_names[all_player_names["playerName"].isin(selected_players)]["playerId"].tolist()
@@ -1160,14 +1183,14 @@ elif section == "Player Comparison":
     match_placeholders = ','.join(['%s'] * len(match_ids))
 
     query_stats = f"""
-        SELECT * FROM player_stats
+        SELECT * FROM vw_championship_player_stats
         WHERE playerId IN ({player_placeholders})
         AND matchId IN ({match_placeholders})
     """
     stats_df = pd.read_sql(query_stats, con=connect_to_db(), params=tuple(player_ids + match_ids))
 
     query_events = f"""
-        SELECT * FROM event_data
+        SELECT * FROM vw_championship_event_data
         WHERE playerId IN ({player_placeholders})
         AND matchId IN ({match_placeholders})
     """

@@ -120,6 +120,9 @@ def connect_to_db():
         st.error("Database credentials are missing.")
         return None
 
+    # Escape special characters in password
+    password = password.replace('*', '%2A')
+
     engine = create_engine(f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}")
     return engine
 
@@ -284,9 +287,7 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
         xA = df.groupby(['playerId', 'matchId'])['xA'].sum().rename('xA')
         ps_xG = df.groupby(['playerId', 'matchId'])['ps_xG'].sum().rename('ps_xG')
 
-        goal_creating_actions = df[
-            df["value_LeadingToGoal"] > 0
-        ].groupby(["playerId", "matchId"]).size().rename("goal_creating_actions")
+        goal_creating_actions = goals.add(assists, fill_value=0).rename("goal_creating_actions")
 
         # --- ✅ Goalkeeper metrics for all players ---
         saves = df[
@@ -409,42 +410,72 @@ def prepare_player_data_with_minutes(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def load_player_data(player_id, player_name):
-    engine = connect_to_db()
+    try:
+        engine = connect_to_db()
+        if not engine:
+            st.error("Failed to connect to database")
+            return None, None, None, None, None, None
 
-    player_stats = pd.read_sql(
-        "SELECT * FROM player_stats WHERE playerId = %s",
-        con=engine,
-        params=(player_id,)
-    )
+        # Load filtered player_stats from view
+        try:
+            player_stats = pd.read_sql(
+                "SELECT * FROM vw_championship_player_stats WHERE playerId = %s",
+                con=engine,
+                params=(player_id,)
+            )
+        except Exception as e:
+            st.error(f"Error loading player stats: {str(e)}")
+            return None, None, None, None, None, None
 
-    # First get the list of match IDs for the player
-    player_data = pd.read_sql(
-        "SELECT * FROM player_data WHERE playerId = %s",
-        con=engine,
-        params=(player_id,)
-    )
+        # Load player_data (still from full table, unless you create a view for it)
+        try:
+            player_data = pd.read_sql(
+                "SELECT * FROM vw_championship_player_data WHERE playerId = %s",
+                con=engine,
+                params=(player_id,)
+            )
+        except Exception as e:
+            st.error(f"Error loading player data: {str(e)}")
+            return None, None, None, None, None, None
 
-    # Prepare minutes played
-    player_data = prepare_player_data_with_minutes(player_data)
+        # Prepare minutes played
+        try:
+            player_data = prepare_player_data_with_minutes(player_data)
+        except Exception as e:
+            st.error(f"Error preparing player data: {str(e)}")
+            return None, None, None, None, None, None
 
-    # Now filter match_data only for those matches
-    match_ids = player_data["matchId"].unique().tolist()
-    if not match_ids:
-        # No matches found, return empty dataframe with columns from match_data
-        match_data = pd.DataFrame()
-    else:
-        placeholders = ','.join(['%s'] * len(match_ids))
-        query_matches = f"SELECT * FROM match_data WHERE matchId IN ({placeholders})"
-        params = tuple(match_ids)
-        match_data = pd.read_sql(query_matches, con=engine, params=params)
+        # Get list of match IDs from player_data
+        match_ids = player_data["matchId"].unique().tolist()
+        if not match_ids:
+            match_data = pd.DataFrame()
+        else:
+            placeholders = ','.join(['%s'] * len(match_ids))
+            query_matches = f"""
+                SELECT * FROM vw_championship_match_data
+                WHERE matchId IN ({placeholders})
+            """
+            try:
+                match_data = pd.read_sql(query_matches, con=engine, params=tuple(match_ids))
+            except Exception as e:
+                st.error(f"Error loading match data: {str(e)}")
+                return None, None, None, None, None, None
 
-    team_data = pd.read_sql("SELECT * FROM team_data", engine)
+        # Load full team_data (could be optimized if needed)
+        try:
+            team_data = pd.read_sql("SELECT * FROM vw_championship_team_data", engine)
+        except Exception as e:
+            st.error(f"Error loading team data: {str(e)}")
+            return None, None, None, None, None, None
 
-    # Aggregates
-    total_minutes = player_data['minutesPlayed'].sum()
-    games_as_starter = player_data['isFirstEleven'].fillna(0).sum()
+        # Aggregates
+        total_minutes = player_data['minutesPlayed'].sum()
+        games_as_starter = player_data['isFirstEleven'].fillna(0).sum()
 
-    return match_data, player_data, team_data, player_stats, total_minutes, games_as_starter
+        return match_data, player_data, team_data, player_stats, total_minutes, games_as_starter
+    except Exception as e:
+        st.error(f"Unexpected error in load_player_data: {str(e)}")
+        return None, None, None, None, None, None
 
 
 @st.cache_data(ttl=300)
@@ -464,13 +495,13 @@ def load_event_data_for_matches(player_id, match_ids, team_id=None):
 
     placeholders = ",".join(["%s"] * len(match_ids))
 
-    # Basic query
+    # Use the optimized view
     query = f"""
-    SELECT * FROM event_data
+    SELECT * FROM vw_championship_event_data
     WHERE playerId = %s AND matchId IN ({placeholders})
     """
 
-    params = (player_id, *match_ids)  # <-- note tuple, not list!
+    params = (player_id, *match_ids)
 
     if team_id:
         query += " AND teamId = %s"
@@ -1433,141 +1464,141 @@ def plot_kpi_comparison(combined_metrics_df, metric_keys, metric_labels, player_
             st.altair_chart(chart, use_container_width=True)
 
 
-def process_player_comparison_metrics(stats_df, events_df, player_position):
+def process_player_comparison_metrics(stats_df, events_df):
     """
     Calculates summary metrics (KPIs) for multiple players for comparison purposes.
-    Applies the same logic as Overview/Trends Stats, adapted to handle multiple players.
+    Applies the same logic as `process_player_metrics`, adapted for a batch of players.
     """
 
-    # --- Step 0: Ensure correct data types for merging and calculations ---
+    if stats_df.empty or events_df.empty:
+        st.warning("🚨 No stats or event data to process.")
+        return pd.DataFrame()
+
+    # --- Step 1: Prepare IDs ---
     stats_df["playerId"] = stats_df["playerId"].astype(str)
     stats_df["matchId"] = stats_df["matchId"].astype(str)
     events_df["playerId"] = events_df["playerId"].astype(str)
     events_df["matchId"] = events_df["matchId"].astype(str)
 
-    # Clean numeric columns in stats_df
+    # --- Step 2: Clean numeric columns ---
     metric_cols_stats = stats_df.columns.drop(['playerId', 'playerName', 'matchId', 'teamId', 'teamName'], errors='ignore')
     for col in metric_cols_stats:
         stats_df[col] = stats_df[col].astype(str).str.replace(",", ".", regex=False)
         stats_df[col] = pd.to_numeric(stats_df[col], errors="coerce")
 
-    # Clean numeric columns in events_df
-    numeric_cols_events = [
-        'x', 'y', 'endX', 'endY', 'value_PassEndX', 'value_PassEndY', 
-        'value_Length', 'xG', 'xA', 'ps_xG'
-    ]
-    for col in numeric_cols_events:
+    event_cols_to_clean = ['x', 'y', 'value_PassEndX', 'value_PassEndY', 'endX', 'endY', 'value_Length', 'xG', 'xA', 'ps_xG']
+    for col in event_cols_to_clean:
         if col in events_df.columns:
             events_df[col] = events_df[col].astype(str).str.replace(",", ".", regex=False)
             events_df[col] = pd.to_numeric(events_df[col], errors="coerce")
 
-    # --- Derived KPIs from stats_df ---
-    stats_df["key_passes"] = stats_df["passesKey"]
-    stats_df["goal_creating_actions"] = stats_df["passesKey"] + stats_df["dribblesWon"]
-    stats_df["shot_creating_actions"] = stats_df["shotsTotal"] + stats_df["passesKey"]
-
-    # --- Event-based metrics ---
-    def_actions_outside = events_df[
-        (events_df["x"] > 25) & events_df["type_displayName"].isin(["Tackle", "Interception", "Clearance"])
-    ].groupby(["playerId", "matchId"]).size().rename("def_actions_outside_box")
-
-    passes_into_pa = events_df[
-        (events_df["value_PassEndX"] >= 94) & events_df["value_PassEndY"].between(21, 79)
-    ].groupby(["playerId", "matchId"]).size().rename("passes_into_penalty_area")
-
-    carries_final_third = events_df[
-        (events_df["x"] < 66.7) & (events_df["endX"] >= 66.7)
-    ].groupby(["playerId", "matchId"]).size().rename("carries_into_final_third")
-
-    carries_pa = events_df[
-        (events_df["endX"] >= 94) & (events_df["endY"].between(21, 79))
-    ].groupby(["playerId", "matchId"]).size().rename("carries_into_penalty_area")
-
-    recoveries = events_df[events_df["type_displayName"] == "BallRecovery"]\
-        .groupby(["playerId", "matchId"]).size().rename("recoveries")
-    interceptions = events_df[events_df["type_displayName"] == "Interception"]\
-        .groupby(["playerId", "matchId"]).size().rename("interceptions")
-    clearances = events_df[events_df["type_displayName"] == "Clearance"]\
-        .groupby(["playerId", "matchId"]).size().rename("clearances")
-    crosses = events_df[events_df["value_Cross"] == 1]\
-        .groupby(["playerId", "matchId"]).size().rename("crosses")
-
-    long_passes_total = events_df[events_df["value_Length"] >= 30]\
-        .groupby(["playerId", "matchId"]).size().rename("long_passes_total")
-
-    long_passes_success = events_df[
-        (events_df["value_Length"] >= 30) & (events_df["outcomeType_displayName"] == "Successful")
-    ].groupby(["playerId", "matchId"]).size().rename("long_passes_success")
-
-    long_pass_pct = (long_passes_success / long_passes_total.replace(0, np.nan) * 100)\
-        .rename("long_pass_pct")
-
-    progressive_passes = events_df[
-        (events_df["type_displayName"] == "Pass") &
-        (events_df["outcomeType_displayName"] == "Successful") &
-        (events_df["value_Length"] >= 9.11) & 
-        (events_df["x"] >= 35) &
-        (~events_df.get("qualifiers", "").astype(str).str.contains("CornerTaken|Freekick", na=False))
-    ].groupby(["playerId", "matchId"]).size().rename("progressive_passes")
-
-    progressive_carry_distance = events_df[
-        (events_df["type_displayName"] == "Carry") & ((events_df["endX"] - events_df["x"]) >= 9.11)
-    ].assign(distance=lambda d: d["endX"] - d["x"])\
-     .groupby(["playerId", "matchId"])["distance"].sum().rename("progressive_carry_distance")
-
-    xG = events_df.groupby(["playerId", "matchId"])["xG"].sum().rename("xG")
-    xA = events_df.groupby(["playerId", "matchId"])["xA"].sum().rename("xA")
-    ps_xG = events_df.groupby(["playerId", "matchId"])["ps_xG"].sum().rename("ps_xG")
-
-    saves = events_df[
-        (events_df["type_displayName"] == "SavedShot") &
-        (events_df["outcomeType_displayName"] == "Successful")
-    ].groupby(["playerId", "matchId"]).size().rename("saves")
-
-    shots_on_target_faced = events_df[
-        (events_df["isShot"] == 1) &
-        (events_df["type_displayName"].isin(["SavedShot", "Goal"]))
-    ].groupby(["playerId", "matchId"]).size().rename("shots_on_target_faced")
-
-    goals_conceded = events_df[
-        (events_df["isShot"] == 1) &
-        (events_df["type_displayName"] == "Goal")
-    ].groupby(["playerId", "matchId"]).size().rename("goals_conceded")
-
-    df_derived = pd.concat([
-        def_actions_outside, passes_into_pa, carries_final_third, carries_pa,
-        recoveries, interceptions, clearances, crosses,
-        long_passes_total, long_passes_success, long_pass_pct,
-        progressive_passes, progressive_carry_distance,
-        xG, xA, ps_xG, saves, shots_on_target_faced, goals_conceded
-    ], axis=1).reset_index().fillna(0)
-
-    df_derived["playerId"] = df_derived["playerId"].astype(str)
-    df_derived["matchId"] = df_derived["matchId"].astype(str)
-
-    df_combined = pd.merge(stats_df, df_derived, on=["playerId", "matchId"], how="left").fillna(0)
-
-    def compute_weighted_pct(df, num_col, denom_col):
+    # --- Step 3: Event-based metrics ---
+    def calculate_event_metrics(df):
         df = df.copy()
-        df[num_col] = pd.to_numeric(df[num_col], errors='coerce')
-        df[denom_col] = pd.to_numeric(df[denom_col], errors='coerce')
-        total_num = df[num_col].sum()
-        total_denom = df[denom_col].sum()
-        return round((total_num / total_denom) * 100, 1) if total_denom != 0 else 0
 
-    player_rows = []
-    for pid in df_combined["playerId"].unique():
-        sub_df = df_combined[df_combined["playerId"] == pid]
-        row = {"playerId": pid}
-        for kpi in position_kpi_map.get(player_position, []):
-            if kpi in percentage_formula_map:
-                num_col, denom_col = percentage_formula_map[kpi]
-                row[kpi] = compute_weighted_pct(sub_df, num_col, denom_col)
-            elif metric_type_map.get(kpi) == "percentage":
-                row[kpi] = round(sub_df[kpi].mean(), 1)
-            else:
-                row[kpi] = round(sub_df[kpi].sum(), 1)
-        player_rows.append(row)
+        passes_into_penalty_area = df[
+            (df['value_PassEndX'] >= 88.5) & (df['value_PassEndY'].between(13.6, 54.4))
+        ].groupby(['playerId', 'matchId']).size().rename('passes_into_penalty_area')
 
-    summary_df = pd.DataFrame(player_rows)
-    return summary_df
+        carries_into_final_third = df[
+            (df['x'] < 66.7) & (df['endX'] >= 66.7)
+        ].groupby(['playerId', 'matchId']).size().rename('carries_into_final_third')
+
+        carries_into_penalty_area = df[
+            (df['endX'] >= 88.5) & (df['endY'].between(13.6, 54.4))
+        ].groupby(['playerId', 'matchId']).size().rename('carries_into_penalty_area')
+
+        goals = df[df['type_displayName'] == 'Goal'].groupby(['playerId', 'matchId']).size().rename('goals')
+        assists = df[df['value_IntentionalGoalAssist'] == 1].groupby(['playerId', 'matchId']).size().rename('assists')
+        crosses = df[df['value_Cross'] == 1].groupby(['playerId', 'matchId']).size().rename('crosses')
+
+        long_passes = df[df['value_Length'] >= 30]
+        long_passes_total = long_passes.groupby(['playerId', 'matchId']).size().rename('long_passes_total')
+        long_passes_success = long_passes[long_passes['outcomeType_displayName'] == 'Successful']\
+            .groupby(['playerId', 'matchId']).size().rename('long_passes_success')
+        long_pass_pct = (long_passes_success / long_passes_total.replace(0, np.nan) * 100).rename('long_pass_pct')
+
+        progressive_passes = df[
+            (df['type_displayName'] == 'Pass') &
+            (df['outcomeType_displayName'] == 'Successful') &
+            (df['value_Length'] >= 9.11) &
+            (df['x'] >= 35) &
+            (~df['qualifiers'].str.contains('CornerTaken|Freekick', na=False))
+        ].groupby(['playerId', 'matchId']).size().rename('progressive_passes')
+
+        progressive_carry_distance = df[
+            (df['type_displayName'] == 'Carry') & ((df['endX'] - df['x']) >= 9.11)
+        ].assign(distance=lambda d: d['endX'] - d['x']) \
+        .groupby(['playerId', 'matchId'])['distance'].sum().rename('progressive_carry_distance')
+
+        def_actions_outside_box = df[
+            (df['x'] > 25) & df['type_displayName'].isin(['Tackle', 'Interception', 'Clearance'])
+        ].groupby(['playerId', 'matchId']).size().rename('def_actions_outside_box')
+
+        recoveries = df[df['type_displayName'] == 'BallRecovery']\
+            .groupby(['playerId', 'matchId']).size().rename('recoveries')
+
+        shot_creation_actions = df[df['value_ShotAssist'] > 0]\
+            .groupby(['playerId', 'matchId']).size().rename('shot_creation_actions')
+
+        xG = df.groupby(['playerId', 'matchId'])['xG'].sum().rename('xG')
+        xA = df.groupby(['playerId', 'matchId'])['xA'].sum().rename('xA')
+        ps_xG = df.groupby(['playerId', 'matchId'])['ps_xG'].sum().rename('ps_xG')
+
+        goal_creating_actions = goals.add(assists, fill_value=0).rename("goal_creating_actions")
+
+        saves = df[(df["type_displayName"] == "SavedShot") & (df["outcomeType_displayName"] == "Successful")]\
+            .groupby(["playerId", "matchId"]).size().rename("saves")
+
+        shots_on_target_faced = df[(df["isShot"] == 1) & df["type_displayName"].isin(["SavedShot", "Goal"])]\
+            .groupby(["playerId", "matchId"]).size().rename("shots_on_target_faced")
+
+        goals_conceded = df[(df["isShot"] == 1) & (df["type_displayName"] == "Goal")]\
+            .groupby(["playerId", "matchId"]).size().rename("goals_conceded")
+
+        return pd.concat([
+            passes_into_penalty_area,
+            carries_into_final_third,
+            carries_into_penalty_area,
+            goals, assists, crosses,
+            long_passes_total, long_passes_success, long_pass_pct,
+            progressive_passes, progressive_carry_distance,
+            def_actions_outside_box, recoveries,
+            shot_creation_actions, goal_creating_actions,
+            xG, xA, ps_xG,
+            saves, shots_on_target_faced, goals_conceded
+        ], axis=1).fillna(0).reset_index()
+
+    event_metrics = calculate_event_metrics(events_df)
+
+    # --- Step 4: Merge event and stat metrics ---
+    combined_df = pd.merge(stats_df, event_metrics, on=["playerId", "matchId"], how="left").fillna(0)
+
+    # --- Step 5: Derived KPIs ---
+    combined_df["pass_completion_pct"] = (combined_df["passesAccurate"] / combined_df["passesTotal"].replace(0, np.nan)) * 100
+    combined_df["aerial_duel_pct"] = (combined_df["aerialsWon"] / combined_df["aerialsTotal"].replace(0, np.nan)) * 100
+    combined_df["take_on_success_pct"] = (combined_df["dribblesWon"] / combined_df["dribblesAttempted"].replace(0, np.nan)) * 100
+    combined_df["shots_on_target_pct"] = (combined_df["shotsOnTarget"] / combined_df["shotsTotal"].replace(0, np.nan)) * 100
+    combined_df["tackle_success_pct"] = (combined_df["tackleSuccessful"] / combined_df["tacklesTotal"].replace(0, np.nan)) * 100
+    combined_df["throwin_accuracy_pct"] = (combined_df["throwInsAccurate"] / combined_df["throwInsTotal"].replace(0, np.nan)) * 100
+    combined_df["save_pct"] = (combined_df["saves"] / combined_df["shots_on_target_faced"].replace(0, np.nan)) * 100
+
+    combined_df["key_passes"] = combined_df["passesKey"]
+    combined_df["goal_creating_actions"] = combined_df["goal_creating_actions"].fillna(0)
+    combined_df["shot_creating_actions"] = combined_df["shotsTotal"] + combined_df["passesKey"]
+
+    # Optional: goalkeeper extras
+    combined_df["claimsHigh"] = stats_df.get("claimsHigh", 0)
+    combined_df["collected"] = stats_df.get("collected", 0)
+    combined_df["totalSaves"] = stats_df.get("totalSaves", 0)
+
+    # --- Step 6: Format ---
+    percent_cols = [
+        "pass_completion_pct", "aerial_duel_pct", "take_on_success_pct",
+        "shots_on_target_pct", "tackle_success_pct", "throwin_accuracy_pct",
+        "long_pass_pct", "save_pct"
+    ]
+    combined_df[percent_cols] = combined_df[percent_cols].clip(0, 100).round(1)
+    combined_df = combined_df.drop_duplicates(subset=["playerId", "matchId"], keep="last").reset_index(drop=True)
+
+    return combined_df
