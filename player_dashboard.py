@@ -164,7 +164,7 @@ try:
     team_id = str(player_data["teamId"].iloc[0])
     
 except (KeyError, IndexError) as e:
-    st.error(f"Error processing player data: {str(e)}")
+    st.error(f"Error processing player data1: {str(e)}")
     st.error("This might be due to missing columns in the data or empty data.")
     st.stop()
 
