@@ -8,10 +8,11 @@ from io import BytesIO
 import base64
 import os
 import datetime
+from sqlalchemy import text
 from datetime import timedelta
 from PIL import Image
 from db_utils import connect_to_db, load_player_data, load_event_data_for_matches, get_player_position, process_player_metrics
-from db_utils import process_player_comparison_metrics, get_active_players
+from db_utils import get_all_players, process_player_comparison_metrics
 from math import ceil
 from typing import Tuple, Dict, Any
 from sqlalchemy import create_engine
@@ -21,6 +22,8 @@ from pandas.io.formats.style import Styler
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG_DIR = os.path.join(BASE_DIR, 'img')
 LOGO_PATH = os.path.join(IMG_DIR, 'watford_logo.png')
+
+
 
 st.set_page_config(
     page_title="Watford Player Development Hub",
@@ -37,74 +40,74 @@ if "logged_in" not in st.session_state or not st.session_state.logged_in:
 # Verificar si el usuario es staff o jugador
 is_staff = st.session_state.user_type == "staff"
 
-# Función para cargar la lista de jugadores activos
+# Función para cargar la lista de jugadores (activos e inactivos)
 def load_players_list() -> Dict[int, Dict[str, Any]]:
-    """Carga la lista de jugadores activos para el menú desplegable."""
+    """Carga todos los jugadores con campo 'activo' interpretado como booleano."""
     try:
-        players_df = get_active_players()
-        
-        # Verificar si el DataFrame está vacío
+        players_df = get_all_players()  # Make sure this returns ALL players
+
         if players_df is None or players_df.empty:
-            st.error("No se encontraron jugadores activos.")
+            st.error("No se encontraron jugadores.")
             return {}
-            
-        # Convertir el DataFrame a un diccionario con el formato esperado
+
         players_dict = {}
         for _, row in players_df.iterrows():
-            player_id = row.get('player_id') or row.get('id')  # Ajusta según el nombre de la columna
-            if player_id is not None:
-                players_dict[player_id] = {
-                    'full_name': f"{row.get('nombre', '')} {row.get('apellido', '')}".strip(),
-                    # Agrega aquí otros campos que necesites
-                }
-        
-        if not players_dict:
-            st.error("No se pudieron cargar los datos de los jugadores.")
-            return {}
+            player_id = row.get('player_id') or row.get('id')
+            if player_id is None:
+                continue
+
+            full_name = f"{row.get('nombre', '')} {row.get('apellido', '')}".strip()
+            activo_value = row.get('activo', 0)
+
+            # ✅ This is all you need:
+            is_active = int(activo_value) == 1
+
+            players_dict[player_id] = {
+                'full_name': full_name,
+                'activo': is_active,
+            }
+
         return players_dict
-        
+
     except Exception as e:
-        st.error(f"Error al cargar la lista de jugadores: {str(e)}")
+        st.error(f"❌ Error al cargar la lista de jugadores: {str(e)}")
         import traceback
-        st.error(f"Detalles del error: {traceback.format_exc()}")
+        st.error(traceback.format_exc())
         return {}
 
-# Configuración de la barra lateral
+
+
+# Sidebar para el usuario tipo staff
 with st.sidebar:
     st.subheader("User Info")
-    
+
     if is_staff:
-        # Mostrar información del staff
+        # Mostrar info do staff
         st.write(f"Staff: {st.session_state.staff_info['full_name']}" if 'staff_info' in st.session_state else "Staff User")
-        
-        # Cargar lista de jugadores para el menú desplegable
+
+        # ✅ Load players (active + inactive)
         players = load_players_list()
-        player_list = {f"{v['full_name']} (ID: {k})": k for k, v in players.items() if k is not None}
-        
-        # Seleccionar jugador
+
+        # ✅ Build player list with "Inactive" tag
+        player_list = {}
+        for player_id, player_info in players.items():
+            status = "" if player_info["activo"] else " (Inactive)"
+            label = f"{player_info['full_name']}{status} (ID: {player_id})"
+            player_list[label] = player_id
+
+        # ✅ Dropdown to select player
         selected_player = st.selectbox(
             "Select Player",
             options=[""] + list(player_list.keys()),
             index=0
         )
-        
+
         if selected_player:
             player_id = player_list[selected_player]
             player_name = selected_player.split(" (ID:")[0]
         else:
             st.warning("Please select a player")
             st.stop()
-    else:
-        # Mostrar información del jugador
-        st.write(f"Player: {st.session_state.player_name}")
-        st.write(f"ID: {st.session_state.player_id}")
-        player_id = st.session_state.player_id
-        player_name = st.session_state.player_name
-    
-    if st.button("Logout"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
 
 # Si es staff y no se ha seleccionado un jugador, mostrar mensaje
 if is_staff and 'player_id' not in locals():
@@ -132,36 +135,11 @@ if player_data is None:
 # After loading player_data as before
 player_id = str(player_id)
 
-# try:
-#     match_ids = [str(m) for m in player_data["matchId"].unique()]
-#     team_id = str(player_data["teamId"].iloc[0])  # assuming single team
-# except (KeyError, IndexError) as e:
-#     st.error(f"Error processing player data 1: {str(e)}")
-#     st.error("This might be due to missing columns in the data or empty data.")
-#     st.stop()
-# CAMBIAR POR:
 try:
-    st.write(f"DEBUG: player_data shape: {player_data.shape}")
-    st.write(f"DEBUG: player_data columns: {player_data.columns.tolist()}")
-    st.write(f"DEBUG: player_data head: {player_data.head()}")
-    
-    if player_data.empty:
-        st.error("❌ player_data está vacío")
-        st.stop()
-    
-    if "matchId" not in player_data.columns:
-        st.error("❌ Column 'matchId' not found")
-        st.stop()
-        
-    if "teamId" not in player_data.columns:
-        st.error("❌ Column 'teamId' not found") 
-        st.stop()
-    
     match_ids = [str(m) for m in player_data["matchId"].unique()]
-    team_id = str(player_data["teamId"].iloc[0])
-    
+    team_id = str(player_data["teamId"].iloc[0])  # assuming single team
 except (KeyError, IndexError) as e:
-    st.error(f"Error processing player data2: {str(e)}")
+    st.error(f"Error processing player data: {str(e)}")
     st.error("This might be due to missing columns in the data or empty data.")
     st.stop()
 
@@ -901,51 +879,36 @@ elif section == "Trends Stats":
 
         season_avg = metrics_summary[key].mean()
 
-        with st.container(border=True):
-            st.markdown(f"**{metric_labels[key]}**")
-
-            # Tooltip list
-            tooltip_fields = [
-                alt.Tooltip("opponent_label:N", title="Match"),
-                alt.Tooltip(f"{key}:Q", title=metric_labels[key], format=".2f")
-            ]
-            for extra_field in metric_tooltip_fields.get(key, []):
-                if extra_field in chart_data.columns:
-                    tooltip_fields.append(
-                        alt.Tooltip(f"{extra_field}:Q", title=extra_field.replace("_", " ").title())
-                    )
-
-            # NEW: Sort opponent_label based on matchDate!
-            sort_order = list(chart_data.sort_values("matchDate")["opponent_label"])
-
-            bar_chart = alt.Chart(chart_data).mark_bar(color="#fcec03").encode(
-                x=alt.X("opponent_label:N", title="Match", sort=sort_order, axis=alt.Axis(labelAngle=-45)),
-                y=alt.Y(f"{key}:Q", title=metric_labels[key]),
-                tooltip=tooltip_fields
-            )
-
-            avg_line = alt.Chart(pd.DataFrame({"y": [season_avg]})).mark_rule(
-                color="red", strokeDash=[4, 4]
-            ).encode(y="y:Q")
-
-            avg_text = alt.Chart(pd.DataFrame({
-                "x": [sort_order[-1]],
-                "y": [season_avg],
-                "label": [f"Avg: {season_avg:.1f}"]
-            })).mark_text(
-                align="left",
-                baseline="bottom",
-                dy=-5,
-                color="red"
-            ).encode(
-                x=alt.X("x:N"),
-                y=alt.Y("y:Q"),
-                text="label:N"
-            )
-
-            chart = (bar_chart + avg_line + avg_text).properties(height=300)
-
-            st.altair_chart(chart, use_container_width=True)
+        # Create the bar chart
+        fig = px.bar(
+            chart_data,
+            x="opponent_label",
+            y=key,
+            title=metric_labels[key],
+            color_discrete_sequence=["#fcec03"],  # Yellow color
+            hover_data=metric_tooltip_fields.get(key, []),
+            labels={key: metric_labels[key]},
+            height=300
+        )
+            
+        # Add season average line
+        fig.add_hline(
+            y=season_avg,
+            line_dash="dash",
+            line_color="red",
+            annotation_text=f"Avg: {season_avg:.1f}",
+            annotation_position="top right"
+        )
+            
+        # Update layout for better readability
+        fig.update_layout(
+            xaxis_title="Match",
+            yaxis_title=metric_labels[key],
+            showlegend=False,
+            xaxis_tickangle=-45
+        )
+            
+        st.plotly_chart(fig, use_container_width=True)
 
 
 elif section == "Player Comparison":
@@ -960,35 +923,51 @@ elif section == "Player Comparison":
     season_matches = pd.read_sql(
     """
     SELECT * FROM match_data
-    WHERE season = %s AND competition = 'Championship'
+    WHERE season = %s AND competition = 'eng-championship'
     """,
     con=engine,
     params=(selected_season,)
     )
 
-    # ✅ Step 1A: Filter team_data to only include teams from Championship, 2024–2025
+   # Step 2: Clean and split score column
+    # Clean and split the score column safely
+    season_matches["score_clean"] = season_matches["score"].astype(str).str.strip().str.replace(" ", "", regex=False)
+
+    # Only keep rows like "2:1"
+    valid_scores = season_matches["score_clean"].str.contains(r"^\d+:\d+$", na=False)
+
+    # Drop NaNs and ensure format is safe to split
+    clean_scores = season_matches.loc[valid_scores, "score_clean"].dropna()
+
+    # ✅ Split with expand=True and ensure result is a DataFrame
+    score_split = clean_scores.str.split(":", expand=True)
+
+    # ✅ Check if score_split is valid (has 2 columns)
+    if score_split.shape[1] < 2:
+        st.error("❌ Score splitting failed — format not consistent with '1:0'")
+    else:
+        # Assign safely
+        season_matches.loc[clean_scores.index, "home_goals"] = pd.to_numeric(score_split.iloc[:, 0], errors="coerce")
+        season_matches.loc[clean_scores.index, "away_goals"] = pd.to_numeric(score_split.iloc[:, 1], errors="coerce")
+
+    
+    # Step 3: Filter team_data by matchIds
     filtered_match_ids = season_matches["matchId"].unique().tolist()
     team_data_filtered = team_data[team_data["matchId"].isin(filtered_match_ids)].copy()
 
-    # Preprocess scores
-    score_split = season_matches["score"].str.replace(" ", "", regex=False).str.split(":", expand=True)
-    season_matches["home_goals"] = pd.to_numeric(score_split[0], errors="coerce")
-    season_matches["away_goals"] = pd.to_numeric(score_split[1], errors="coerce")
-
-    # Merge with team_data to get both teams per match
+    # Step 4: Merge scores into team_data
     team_scores_df = pd.merge(
         team_data_filtered,
         season_matches[["matchId", "home_goals", "away_goals", "score"]],
-        on="matchId", how="inner"
+        on="matchId",
+        how="inner"
     )
 
-    # Infer home/away status
-    team_scores_df["home_away"] = team_scores_df.apply(
-        lambda row: "home" if row["scores.fulltime"] == row["home_goals"] else "away",
-        axis=1
-    )
+    # Step 5: Infer home/away by order within matchId
+    team_scores_df["team_order"] = team_scores_df.groupby("matchId").cumcount()
+    team_scores_df["home_away"] = team_scores_df["team_order"].map({0: "home", 1: "away"})
 
-    # Assign points
+    # Step 6: Assign points
     def assign_points(row):
         if row["home_away"] == "home":
             return 3 if row["home_goals"] > row["away_goals"] else 1 if row["home_goals"] == row["away_goals"] else 0
@@ -997,7 +976,7 @@ elif section == "Player Comparison":
 
     team_scores_df["points"] = team_scores_df.apply(assign_points, axis=1)
 
-    # Group and sort all teams by points
+    # Step 7: Aggregate total points per team
     team_points = (
         team_scores_df
         .groupby(["teamId", "teamName"], as_index=False)["points"]
@@ -1005,7 +984,7 @@ elif section == "Player Comparison":
         .sort_values(by="points", ascending=False)
     )
 
-    # Save top 5 if needed
+    # Step 8: Select top 5 teams
     top_5_teams = team_points.head(5)
     top_team_ids = top_5_teams["teamId"].tolist()
     top_5_team_names = top_5_teams["teamName"].tolist()
@@ -1193,19 +1172,20 @@ elif section == "Player Comparison":
         filtered_players["playerId"] = filtered_players["playerId"].astype(str)
         filtered_players["matchId"] = filtered_players["matchId"].astype(str)
 
-        # ✅ FIX: Ensure logged-in player is included with full metadata
+        # Ensure logged-in player is included with full metadata
         logged_player_id = str(player_id)
         logged_player_name = player_name
 
-        logged_matches_full = players_full[
-            (players_full["playerId"] == logged_player_id) &
-            (players_full["matchId"].isin(filtered_players["matchId"].unique()))
-        ]
+        # Get all matches for the logged-in player
+        logged_matches_full = players_full[players_full["playerId"] == logged_player_id]
+        
+        # Add logged-in player's data to filtered players
+        filtered_players = pd.concat([filtered_players, logged_matches_full]).drop_duplicates(
+            subset=["playerId", "matchId"]
+        ).reset_index(drop=True)
 
-        if not logged_matches_full.empty:
-            filtered_players = pd.concat([filtered_players, logged_matches_full]).drop_duplicates(
-                subset=["playerId", "matchId"]
-            ).reset_index(drop=True)
+        # Ensure logged-in player's matches are included in match_ids
+        match_ids = filtered_players["matchId"].unique().tolist()
 
         # Proceed to load player stats and events
         player_ids = filtered_players["playerId"].unique().tolist()
@@ -1235,57 +1215,132 @@ elif section == "Player Comparison":
     events_df["playerId"] = events_df["playerId"].astype(str)
     events_df["matchId"] = events_df["matchId"].astype(str)
 
-    # --- Compute metrics using shared logic ---
-    summary_metrics_df = process_player_comparison_metrics(stats_df, events_df, player_position)
+    # Combine logged player's stats with other players' metrics
 
-    summary_comparison_df["playerId"] = summary_comparison_df["playerId"].astype(str)
-    summary_metrics_df["playerId"] = summary_metrics_df["playerId"].astype(str)
+    # --- STEP 6: KPI Calculation for Selected Players (logged-in + comparison) ---
 
-    # --- Merge playerName and teamName for chart display ---
-    summary_metrics_df = pd.merge(
-        summary_metrics_df,
-        summary_comparison_df[["playerId", "playerName", "teamName"]],
-        on="playerId", how="left"
+    # Prepare logged-in player metrics from Section 1
+    logged_player_metrics = metrics_summary[
+    (metrics_summary["matchDate"] >= pd.to_datetime(start_date)) &
+    (metrics_summary["matchDate"] <= pd.to_datetime(end_date))
+    ].copy()
+    logged_player_metrics["playerId"] = str(player_id)
+
+    # Filter stats/events for comparison players
+    comparison_stats = stats_df[stats_df["playerId"] != str(player_id)].copy()
+    comparison_events = events_df[events_df["playerId"] != str(player_id)].copy()
+
+    # Compute match-level metrics for comparison players
+    comparison_metrics = process_player_comparison_metrics(
+        comparison_stats, comparison_events, player_position
     )
 
-    # --- KPI Comparison Charts ---
+    # Combine both
+    all_metrics_df = pd.concat([logged_player_metrics, comparison_metrics], ignore_index=True)
+
+    # Add playerName and teamName from summary_comparison_df
+    player_info_map = summary_comparison_df.set_index("playerId")[["playerName", "teamName"]].to_dict(orient="index")
+    if logged_player_id not in player_info_map:
+        logged_team_name = player_data[player_data["playerId"] == logged_player_id]["teamName"].values[0]
+        player_info_map[logged_player_id] = {
+            "playerName": logged_player_name,
+            "teamName": logged_team_name
+        }
+    all_metrics_df["playerName"] = all_metrics_df["playerId"].map(lambda x: player_info_map.get(x, {}).get("playerName", ""))
+    all_metrics_df["teamName"] = all_metrics_df["playerId"].map(lambda x: player_info_map.get(x, {}).get("teamName", ""))
+
+    # --- Group by player and aggregate metrics ---
+    grouped = all_metrics_df.groupby("playerId")
+
+    # Initialize summary DataFrame
+    summary_metrics_df = grouped[["playerName", "teamName"]].first().reset_index()
+
+    # Loop through position-based KPIs and aggregate
+    for kpi in position_kpi_map.get(player_position, []):
+        metric_type = metric_type_map.get(kpi, "aggregate")
+
+        if metric_type == "percentage":
+            numerator, denominator = percentage_formula_map.get(kpi, (None, None))
+            if numerator in all_metrics_df.columns and denominator in all_metrics_df.columns:
+                sum_num = grouped[numerator].sum()
+                sum_den = grouped[denominator].sum()
+                weighted_avg = (sum_num / sum_den.replace(0, np.nan)) * 100
+                summary_metrics_df[kpi] = summary_metrics_df["playerId"].map(weighted_avg.round(1))
+            else:
+                summary_metrics_df[kpi] = np.nan
+        else:
+            if kpi in all_metrics_df.columns:
+                total = grouped[kpi].sum()
+                summary_metrics_df[kpi] = summary_metrics_df["playerId"].map(total.round(1))
+            else:
+                summary_metrics_df[kpi] = np.nan
+
+    # Add tooltip support
+    all_tooltip_fields = set()
+    for fields in metric_tooltip_fields.values():
+        all_tooltip_fields.update(fields)
+
+    for tooltip_col in all_tooltip_fields:
+        if tooltip_col in all_metrics_df.columns:
+            summary_metrics_df[tooltip_col] = summary_metrics_df["playerId"].map(grouped[tooltip_col].sum().round(1))
+        else:
+            summary_metrics_df[tooltip_col] = np.nan
+
+    # Final cleanup
+    summary_metrics_df = summary_metrics_df.fillna(0)
+
+    # --- Plot KPI Comparison Charts ---
     st.info("Comparison by KPI")
 
     for kpi in position_kpi_map.get(player_position, []):
         if kpi not in summary_metrics_df.columns:
             continue
 
-        st.write("Merged Data Sample", summary_metrics_df[["playerId", "playerName", kpi]].head())
+        chart_data = summary_metrics_df[["playerName", kpi]].copy()
+        chart_data = chart_data.sort_values(by=kpi, ascending=False)
+        chart_data["color"] = chart_data["playerName"].apply(
+            lambda name: "#FFD700" if name == player_name else "#d3d3d3"
+        )
 
-        chart_data = summary_metrics_df[["playerName", kpi]].dropna()
-        chart_data["color"] = chart_data["playerName"].apply(lambda x: "#FFD700" if x == player_name else "#d3d3d3")
+        tooltip_fields = ["playerName", kpi] + metric_tooltip_fields.get(kpi, [])
+        for col in tooltip_fields:
+            if col not in chart_data.columns:
+                chart_data[col] = np.nan
+
+        fig = px.bar(
+            chart_data,
+            x="playerName",
+            y=kpi,
+            title=metric_labels.get(kpi, kpi),
+            color="color",
+            color_discrete_map="identity",
+            hover_data=tooltip_fields,
+            labels={kpi: metric_labels.get(kpi, kpi)},
+            height=300
+        )
+
+        # Add season average line
         season_avg = chart_data[kpi].mean()
+        fig.add_hline(
+            y=season_avg,
+            line_dash="dash",
+            line_color="red",
+            annotation_text=f"Avg: {season_avg:.2f}",
+            annotation_position="top right"
+        )
 
-        with st.container(border=True):
-            st.markdown(f"**{metric_labels.get(kpi, kpi)}**")
+        # Clamp percentage metrics to 100%
+        if metric_type_map.get(kpi) == "percentage":
+            fig.update_yaxes(range=[0, 100])
 
-            tooltip = [
-                alt.Tooltip("playerName:N", title="Player"),
-                alt.Tooltip(kpi + ":Q", title=metric_labels.get(kpi, kpi), format=".2f")
-            ]
+        fig.update_layout(
+            xaxis_title="Player",
+            yaxis_title=metric_labels.get(kpi, kpi),
+            showlegend=False
+        )
 
-            bar = alt.Chart(chart_data).mark_bar().encode(
-                x=alt.X("playerName:N", sort="-y", title="Player"),
-                y=alt.Y(f"{kpi}:Q", title=metric_labels.get(kpi, kpi)),
-                color=alt.Color("color:N", scale=None),
-                tooltip=tooltip
-            )
+        st.plotly_chart(fig, use_container_width=True)
 
-            avg_line = alt.Chart(pd.DataFrame({"y": [season_avg]})).mark_rule(color="red", strokeDash=[4, 4]).encode(y="y:Q")
-            avg_text = alt.Chart(pd.DataFrame({
-                "x": [chart_data["playerName"].iloc[-1]],
-                "y": [season_avg],
-                "label": [f"Avg: {season_avg:.1f}"]
-            })).mark_text(align="left", baseline="bottom", dy=-5, color="red").encode(
-                x=alt.X("x:N"),
-                y=alt.Y("y:Q"),
-                text="label:N"
-            )
+    st.expander("### Players Stats KPI Comparison")
+    st.dataframe(summary_metrics_df, use_container_width=True)
 
-            chart = (bar + avg_line + avg_text).properties(height=300)
-            st.altair_chart(chart, use_container_width=True)
