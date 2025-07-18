@@ -419,7 +419,7 @@ def load_player_data(player_id, player_name):
         # Load filtered player_stats from view
         try:
             player_stats = pd.read_sql(
-                "SELECT * FROM vw_championship_player_stats WHERE playerId = %s",
+                "SELECT * FROM player_stats WHERE playerId = %s",
                 con=engine,
                 params=(player_id,)
             )
@@ -430,7 +430,7 @@ def load_player_data(player_id, player_name):
         # Load player_data (still from full table, unless you create a view for it)
         try:
             player_data = pd.read_sql(
-                "SELECT * FROM vw_championship_player_data WHERE playerId = %s",
+                "SELECT * FROM player_data WHERE playerId = %s",
                 con=engine,
                 params=(player_id,)
             )
@@ -452,7 +452,7 @@ def load_player_data(player_id, player_name):
         else:
             placeholders = ','.join(['%s'] * len(match_ids))
             query_matches = f"""
-                SELECT * FROM vw_championship_match_data
+                SELECT * FROM match_data
                 WHERE matchId IN ({placeholders})
             """
             try:
@@ -463,7 +463,7 @@ def load_player_data(player_id, player_name):
 
         # Load full team_data (could be optimized if needed)
         try:
-            team_data = pd.read_sql("SELECT * FROM vw_championship_team_data", engine)
+            team_data = pd.read_sql("SELECT * FROM team_data", engine)
         except Exception as e:
             st.error(f"Error loading team data: {str(e)}")
             return None, None, None, None, None, None
@@ -497,7 +497,7 @@ def load_event_data_for_matches(player_id, match_ids, team_id=None):
 
     # Use the optimized view
     query = f"""
-    SELECT * FROM vw_championship_event_data
+    SELECT * FROM event_data
     WHERE playerId = %s AND matchId IN ({placeholders})
     """
 
@@ -1094,18 +1094,15 @@ def get_player_activities(player_id: int, start_date: str, end_date: str) -> pd.
         return pd.DataFrame()
 
 
-def get_active_players() -> pd.DataFrame:
+def get_all_players() -> pd.DataFrame:
     """
-    Obtiene la lista de jugadores activos con su información básica.
-    
-    Returns:
-        pd.DataFrame: DataFrame con las columnas [id, nombre, apellido, nombre_completo, posicion, equipo]
+    Devuelve todos los jugadores con su información, incluyendo el campo 'activo'.
     """
     try:
         engine = connect_to_db()
         if not engine:
             return pd.DataFrame()
-            
+
         query = """
             SELECT 
                 id,
@@ -1113,19 +1110,19 @@ def get_active_players() -> pd.DataFrame:
                 apellido,
                 CONCAT(nombre, ' ', apellido) as nombre_completo,
                 posicion,
-                equipo
+                equipo,
+                activo
             FROM jugadores
-            WHERE activo = 1
             ORDER BY nombre, apellido
         """
-        
+
         with engine.connect() as conn:
             df = pd.read_sql(text(query), conn)
-            
+
         return df
-        
+
     except Exception as e:
-        print(f"Error en get_active_players: {e}")
+        print(f"Error en get_all_players: {e}")
         return pd.DataFrame()
 
 
@@ -1464,7 +1461,7 @@ def plot_kpi_comparison(combined_metrics_df, metric_keys, metric_labels, player_
             st.altair_chart(chart, use_container_width=True)
 
 
-def process_player_comparison_metrics(stats_df, events_df):
+def process_player_comparison_metrics(stats_df, events_df, player_position):
     """
     Calculates summary metrics (KPIs) for multiple players for comparison purposes.
     Applies the same logic as `process_player_metrics`, adapted for a batch of players.
