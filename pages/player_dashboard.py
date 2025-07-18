@@ -132,11 +132,36 @@ if player_data is None:
 # After loading player_data as before
 player_id = str(player_id)
 
+# try:
+#     match_ids = [str(m) for m in player_data["matchId"].unique()]
+#     team_id = str(player_data["teamId"].iloc[0])  # assuming single team
+# except (KeyError, IndexError) as e:
+#     st.error(f"Error processing player data 1: {str(e)}")
+#     st.error("This might be due to missing columns in the data or empty data.")
+#     st.stop()
+# CAMBIAR POR:
 try:
+    st.write(f"DEBUG: player_data shape: {player_data.shape}")
+    st.write(f"DEBUG: player_data columns: {player_data.columns.tolist()}")
+    st.write(f"DEBUG: player_data head: {player_data.head()}")
+    
+    if player_data.empty:
+        st.error("❌ player_data está vacío")
+        st.stop()
+    
+    if "matchId" not in player_data.columns:
+        st.error("❌ Column 'matchId' not found")
+        st.stop()
+        
+    if "teamId" not in player_data.columns:
+        st.error("❌ Column 'teamId' not found") 
+        st.stop()
+    
     match_ids = [str(m) for m in player_data["matchId"].unique()]
-    team_id = str(player_data["teamId"].iloc[0])  # assuming single team
+    team_id = str(player_data["teamId"].iloc[0])
+    
 except (KeyError, IndexError) as e:
-    st.error(f"Error processing player data: {str(e)}")
+    st.error(f"Error processing player data2: {str(e)}")
     st.error("This might be due to missing columns in the data or empty data.")
     st.stop()
 
