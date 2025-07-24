@@ -42,29 +42,41 @@ is_staff = st.session_state.user_type == "staff"
 
 # Función para cargar la lista de jugadores (activos e inactivos)
 def load_players_list() -> Dict[int, Dict[str, Any]]:
-    """Carga todos los jugadores con campo 'activo' interpretado como booleano."""
+    """Carga jugadores desde archivo CSV o Excel."""
     try:
-        players_df = get_all_players()  # Make sure this returns ALL players
-
-        if players_df is None or players_df.empty:
-            st.error("No se encontraron jugadores.")
+        # Check if we have a saved players file
+        saved_file_path = os.path.join('data', 'watford_players_login_info.xlsx')
+        
+        if os.path.exists(saved_file_path):
+            # Read Excel file
+            players_df = pd.read_excel(saved_file_path)
+            
+            # Get column names from the file
+            column_names = players_df.columns.tolist()
+        
+            # Use 'activo' as the column name
+            activo_col = 'activo'
+            
+            if activo_col in column_names:
+                # Convert the activo column to numeric
+                players_df[activo_col] = pd.to_numeric(players_df[activo_col], errors='coerce').fillna(1).astype(int)
+            else:
+                st.error("❌ Column 'activo' not found in the file. Please check the column name.")
+                return {}
+        else:
+            st.warning("No players file found. Please upload a file containing player data.")
             return {}
 
+        # For staff users, show all players from the file
         players_dict = {}
         for _, row in players_df.iterrows():
-            player_id = row.get('player_id') or row.get('id')
-            if player_id is None:
+            full_name = row.get('playerName', '').strip()
+            if not full_name:
                 continue
 
-            full_name = f"{row.get('nombre', '')} {row.get('apellido', '')}".strip()
-            activo_value = row.get('activo', 0)
-
-            # ✅ This is all you need:
-            is_active = int(activo_value) == 1
-
-            players_dict[player_id] = {
+            players_dict[full_name] = {
                 'full_name': full_name,
-                'activo': is_active,
+                'activo': int(row.get('activo', 1)),  # Get activo value directly
             }
 
         return players_dict
@@ -79,8 +91,7 @@ def load_players_list() -> Dict[int, Dict[str, Any]]:
 
 # Sidebar para el usuario tipo staff
 with st.sidebar:
-    st.subheader("User Info")
-
+    st.subheader("Player Dashboard")
     if is_staff:
         # Mostrar info do staff
         st.write(f"Staff: {st.session_state.staff_info['full_name']}" if 'staff_info' in st.session_state else "Staff User")
@@ -90,17 +101,87 @@ with st.sidebar:
 
         # ✅ Build player list with "Inactive" tag
         player_list = {}
-        for player_id, player_info in players.items():
-            status = "" if player_info["activo"] else " (Inactive)"
-            label = f"{player_info['full_name']}{status} (ID: {player_id})"
-            player_list[label] = player_id
+        for player_name, player_info in players.items():
+            status = "" if player_info["activo"] == 1 else " (Inactive)"
+            label = f"{player_info['full_name']}{status}"
+            player_list[label] = player_name
+
+        # Add filter for player status
+        player_status_filter = st.selectbox(
+            "Filter Players by Status",
+            options=["All Players", "Active Players", "Inactive Players"],
+            key="player_status_filter"
+        )
+
+        # Filter players based on status
+        if player_status_filter == "Active Players":
+            player_list = {k: v for k, v in player_list.items() if players[v]["activo"] == 1}
+        elif player_status_filter == "Inactive Players":
+            player_list = {k: v for k, v in player_list.items() if players[v]["activo"] == 0}
 
         # ✅ Dropdown to select player
+        player_options = list(player_list.keys())
+        if player_status_filter == "All Players":
+            player_options = [""] + player_options  # Add blank option at the start
         selected_player = st.selectbox(
             "Select Player",
-            options=[""] + list(player_list.keys()),
-            index=0
+            options=player_options,
+            key="player_selector",
+            index=0 if player_status_filter == "All Players" else None  # Set index to 0 (blank) when All Players is selected
         )
+
+        # Show file upload option at the bottom of the sidebar
+        st.markdown("---")
+        with st.sidebar.expander("Player File Management", expanded=False):
+            # Check if we have a saved players file
+            saved_file_path = os.path.join('data', 'watford_players_login_info.csv')
+            if os.path.exists(saved_file_path):
+                # Add download link for template
+                with open(saved_file_path, 'rb') as f:
+                    template_bytes = f.read()
+                    st.download_button(
+                        label="Download Template",
+                        data=template_bytes,
+                        file_name='player_template.csv',
+                        mime='text/csv'
+                    )
+            
+            uploaded_file = st.file_uploader("Upload Players File", type=['csv', 'xlsx'])
+
+            if uploaded_file is not None:
+                try:
+                    # Read the uploaded file
+                    if uploaded_file.name.endswith('.csv'):
+                        players_df = pd.read_csv(uploaded_file)
+                    else:  # Excel file
+                        players_df = pd.read_excel(uploaded_file)
+
+                    if players_df.empty:
+                        st.error("No data found in the uploaded file.")
+
+                    # Save the file for future use
+                    saved_file_path = os.path.join('data', 'watford_players_login_info.csv')
+                    players_df.to_csv(saved_file_path, index=False)
+                    st.success("Players file saved successfully!")
+                    # Reload players after upload
+                    players = load_players_list()
+                    st.success(f"Players list updated with {len(players)} players!")
+                except Exception as e:
+                    st.error(f"❌ Error uploading file: {str(e)}")
+                    import traceback
+                    st.error(traceback.format_exc())
+
+        # User Info and Logout section
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("User Info")
+        if "staff_info" in st.session_state:
+            st.sidebar.write(f"**Name:** {st.session_state.staff_info['full_name']}")
+            st.sidebar.write(f"**Role:** {st.session_state.staff_info['role']}")
+        
+        if st.sidebar.button("Logout", type="primary"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
 
         if selected_player:
             player_id = player_list[selected_player]
@@ -113,6 +194,7 @@ with st.sidebar:
 if is_staff and 'player_id' not in locals():
     st.warning("Please select a player from the sidebar to view their dashboard.")
     st.stop()
+
 
 # Page title
 
