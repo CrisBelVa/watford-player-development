@@ -120,10 +120,9 @@ def connect_to_db():
         st.error("Database credentials are missing.")
         return None
 
-    # Escape special characters in password
-    password = password.replace('*', '%2A')
-
-    engine = create_engine(f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}")
+    connection_string = f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}?charset=utf8"
+    
+    engine = create_engine(connection_string)
     return engine
 
 
