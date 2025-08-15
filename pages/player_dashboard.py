@@ -17,6 +17,11 @@ from math import ceil
 from typing import Tuple, Dict, Any
 from sqlalchemy import create_engine
 from pandas.io.formats.style import Styler
+# Optional: helper to navigate between pages
+try:
+    from streamlit_extras.switch_page_button import switch_page
+except ModuleNotFoundError:
+    switch_page = None
 
 # Configuración de la página - DEBE SER EL PRIMER COMANDO DE STREAMLIT
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -95,6 +100,15 @@ with st.sidebar:
     if is_staff:
         # Mostrar info do staff
         st.write(f"Staff: {st.session_state.staff_info['full_name']}" if 'staff_info' in st.session_state else "Staff User")
+
+        # Acción para gestionar la lista de jugadores
+        if st.button("⚙️ Gestionar lista de jugadores"):
+            if switch_page:
+                switch_page("manage_players")
+            else:
+                # Fallback: indicar al usuario que use el menú de páginas
+                st.experimental_set_query_params(page="Gestionar lista de jugadores")
+                st.info("Use el menú lateral superior para acceder a 'Gestionar lista de jugadores'.")
 
         # ✅ Load players (active + inactive)
         players = load_players_list()
