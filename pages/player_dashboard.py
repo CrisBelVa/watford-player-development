@@ -45,170 +45,185 @@ if "logged_in" not in st.session_state or not st.session_state.logged_in:
 # Verificar si el usuario es staff o jugador
 is_staff = st.session_state.user_type == "staff"
 
-# Función para cargar la lista de jugadores (activos e inactivos)
-def load_players_list() -> Dict[int, Dict[str, Any]]:
-    """Carga jugadores desde archivo CSV o Excel."""
+# ---- Resolve current player (works for staff and players) ----
+
+def load_players_list() -> Dict[str, Dict[str, Any]]:
+    """
+    Load players from data/watford_players_login_info.[xlsx|csv].
+    Expected columns (preferred): playerId, playerName, activo
+    Falls back gracefully if playerId is missing.
+    Returns a dict keyed by a staff-facing label, with values containing id and name.
+    """
     try:
-        # Check if we have a saved players file
-        saved_file_path = os.path.join('data', 'watford_players_login_info.xlsx')
-        
-        if os.path.exists(saved_file_path):
-            # Read Excel file
-            players_df = pd.read_excel(saved_file_path)
-            
-            # Get column names from the file
-            column_names = players_df.columns.tolist()
-        
-            # Use 'activo' as the column name
-            activo_col = 'activo'
-            
-            if activo_col in column_names:
-                # Convert the activo column to numeric
-                players_df[activo_col] = pd.to_numeric(players_df[activo_col], errors='coerce').fillna(1).astype(int)
-            else:
-                st.error("❌ Column 'activo' not found in the file. Please check the column name.")
-                return {}
+        base_csv = os.path.join('data', 'watford_players_login_info.csv')
+        base_xlsx = os.path.join('data', 'watford_players_login_info.xlsx')
+
+        if os.path.exists(base_csv):
+            players_df = pd.read_csv(base_csv)
+        elif os.path.exists(base_xlsx):
+            players_df = pd.read_excel(base_xlsx)
         else:
-            st.warning("No players file found. Please upload a file containing player data.")
+            st.warning("No players file found. Please upload a file (CSV or XLSX) with columns like playerId, playerName, activo.")
             return {}
 
-        # For staff users, show all players from the file
-        players_dict = {}
+        # Normalize column names
+        players_df.columns = [c.strip() for c in players_df.columns]
+
+        # Validate columns
+        if 'playerName' not in players_df.columns:
+            st.error("❌ Column 'playerName' is required in the players file.")
+            return {}
+
+        # activo handling
+        if 'activo' in players_df.columns:
+            players_df['activo'] = pd.to_numeric(players_df['activo'], errors='coerce').fillna(1).astype(int)
+        else:
+            players_df['activo'] = 1
+
+        # Allow missing playerId, but warn
+        has_id = 'playerId' in players_df.columns
+        if not has_id:
+            st.warning("⚠️ Column 'playerId' not found. Staff selection will not provide IDs; some features may fail.")
+
+        players = {}
         for _, row in players_df.iterrows():
-            full_name = row.get('playerName', '').strip()
+            full_name = str(row.get('playerName', '')).strip()
             if not full_name:
                 continue
+            pid = row.get('playerId', None) if has_id else None
+            activo = int(row.get('activo', 1))
 
-            players_dict[full_name] = {
-                'full_name': full_name,
-                'activo': int(row.get('activo', 1)),  # Get activo value directly
+            # Staff-visible label
+            status = "" if activo == 1 else " (Inactive)"
+            label = f"{full_name}{status}" if has_id else f"{full_name}{status}"
+
+            players[label] = {
+                "playerId": None if pd.isna(pid) else str(pid) if pid is not None else None,
+                "playerName": full_name,
+                "activo": activo,
             }
 
-        return players_dict
+        return players
 
     except Exception as e:
-        st.error(f"❌ Error al cargar la lista de jugadores: {str(e)}")
+        st.error(f"❌ Error loading players list: {e}")
         import traceback
         st.error(traceback.format_exc())
         return {}
 
 
-
-# Sidebar para el usuario tipo staff
-with st.sidebar:
-    st.subheader("Player Dashboard")
+def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
+    """
+    Returns (player_id, player_name) for the current session.
+    - Staff: from sidebar selector (requires players file; prefers playerId).
+    - Player: from session_state set at login (expects player_id & player_name OR player_info dict).
+    Raises Streamlit stop if missing info.
+    """
     if is_staff:
-        # Mostrar info do staff
+        st.subheader("Player Dashboard")
+        # Show staff info if available
         st.write(f"Staff: {st.session_state.staff_info['full_name']}" if 'staff_info' in st.session_state else "Staff User")
 
-        # Acción para gestionar la lista de jugadores
-        if st.button("⚙️ Gestionar lista de jugadores"):
+        # Manage players button (optional)
+        if st.button("⚙️ Manage players list"):
             if switch_page:
                 switch_page("manage_players")
             else:
-                # Fallback: indicar al usuario que use el menú de páginas
-                st.experimental_set_query_params(page="Gestionar lista de jugadores")
-                st.info("Use el menú lateral superior para acceder a 'Gestionar lista de jugadores'.")
+                st.info("Use the page menu to open 'Manage Players'.")
 
-        # ✅ Load players (active + inactive)
+        # Load players and build selector
         players = load_players_list()
+        if not players:
+            st.stop()
 
-        # ✅ Build player list with "Inactive" tag
-        player_list = {}
-        for player_name, player_info in players.items():
-            status = "" if player_info["activo"] == 1 else " (Inactive)"
-            label = f"{player_info['full_name']}{status}"
-            player_list[label] = player_name
-
-        # Add filter for player status
+        # Filter by status
         player_status_filter = st.selectbox(
             "Filter Players by Status",
             options=["All Players", "Active Players", "Inactive Players"],
             key="player_status_filter"
         )
 
-        # Filter players based on status
-        if player_status_filter == "Active Players":
-            player_list = {k: v for k, v in player_list.items() if players[v]["activo"] == 1}
-        elif player_status_filter == "Inactive Players":
-            player_list = {k: v for k, v in player_list.items() if players[v]["activo"] == 0}
+        filtered = {}
+        for label, data in players.items():
+            if player_status_filter == "Active Players" and data["activo"] != 1:
+                continue
+            if player_status_filter == "Inactive Players" and data["activo"] == 1:
+                continue
+            filtered[label] = data
 
-        # ✅ Dropdown to select player
-        player_options = list(player_list.keys())
+        options = list(filtered.keys())
         if player_status_filter == "All Players":
-            player_options = [""] + player_options  # Add blank option at the start
-        selected_player = st.selectbox(
-            "Select Player",
-            options=player_options,
-            key="player_selector",
-            index=0 if player_status_filter == "All Players" else None  # Set index to 0 (blank) when All Players is selected
-        )
+            options = [""] + options
 
-        # Show file upload option at the bottom of the sidebar
+        selected = st.selectbox("Select Player", options=options, key="player_selector",
+                                index=0 if player_status_filter == "All Players" else None)
+
+        # File tools
         st.markdown("---")
-        with st.sidebar.expander("Player File Management", expanded=False):
-            # Check if we have a saved players file
-            saved_file_path = os.path.join('data', 'watford_players_login_info.csv')
-            if os.path.exists(saved_file_path):
-                # Add download link for template
-                with open(saved_file_path, 'rb') as f:
-                    template_bytes = f.read()
-                    st.download_button(
-                        label="Download Template",
-                        data=template_bytes,
-                        file_name='player_template.csv',
-                        mime='text/csv'
-                    )
-            
+        with st.expander("Player File Management", expanded=False):
             uploaded_file = st.file_uploader("Upload Players File", type=['csv', 'xlsx'])
-
             if uploaded_file is not None:
                 try:
-                    # Read the uploaded file
                     if uploaded_file.name.endswith('.csv'):
-                        players_df = pd.read_csv(uploaded_file)
-                    else:  # Excel file
-                        players_df = pd.read_excel(uploaded_file)
-
-                    if players_df.empty:
-                        st.error("No data found in the uploaded file.")
-
-                    # Save the file for future use
-                    saved_file_path = os.path.join('data', 'watford_players_login_info.csv')
-                    players_df.to_csv(saved_file_path, index=False)
-                    st.success("Players file saved successfully!")
-                    # Reload players after upload
-                    players = load_players_list()
-                    st.success(f"Players list updated with {len(players)} players!")
+                        up_df = pd.read_csv(uploaded_file)
+                        out_path = os.path.join('data', 'watford_players_login_info.csv')
+                        up_df.to_csv(out_path, index=False)
+                    else:
+                        up_df = pd.read_excel(uploaded_file)
+                        out_path = os.path.join('data', 'watford_players_login_info.xlsx')
+                        up_df.to_excel(out_path, index=False)
+                    st.success(f"Players file saved to {out_path}")
+                    st.experimental_rerun()
                 except Exception as e:
-                    st.error(f"❌ Error uploading file: {str(e)}")
-                    import traceback
-                    st.error(traceback.format_exc())
+                    st.error(f"❌ Error saving file: {e}")
 
-        # User Info and Logout section
+        # Logout
         st.sidebar.markdown("---")
         st.sidebar.subheader("User Info")
         if "staff_info" in st.session_state:
-            st.sidebar.write(f"**Name:** {st.session_state.staff_info['full_name']}")
-            st.sidebar.write(f"**Role:** {st.session_state.staff_info['role']}")
-        
+            st.sidebar.write(f"**Name:** {st.session_state.staff_info.get('full_name','')}")
+            st.sidebar.write(f"**Role:** {st.session_state.staff_info.get('role','')}")
+
         if st.sidebar.button("Logout", type="primary"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
 
-        if selected_player:
-            player_id = player_list[selected_player]
-            player_name = selected_player.split(" (ID:")[0]
-        else:
+        if not selected:
             st.warning("Please select a player")
             st.stop()
 
-# Si es staff y no se ha seleccionado un jugador, mostrar mensaje
-if is_staff and 'player_id' not in locals():
-    st.warning("Please select a player from the sidebar to view their dashboard.")
-    st.stop()
+        sel_data = filtered[selected]
+        pid = sel_data.get("playerId")
+        pname = sel_data.get("playerName")
 
+        if pid is None:
+            st.error("Selected player has no 'playerId'. Add a 'playerId' column to your players file.")
+            st.stop()
+
+        return str(pid), pname
+
+    # Player (non-staff) flow: get from session_state (set during login)
+    # Try common keys used in the app
+    pid = (st.session_state.get("player_id") or
+           st.session_state.get("playerInfo", {}).get("player_id") or
+           st.session_state.get("player_info", {}).get("player_id") or
+           st.session_state.get("player_info", {}).get("playerId"))
+    pname = (st.session_state.get("player_name") or
+             st.session_state.get("playerInfo", {}).get("player_name") or
+             st.session_state.get("player_info", {}).get("player_name") or
+             st.session_state.get("player_info", {}).get("full_name") or
+             st.session_state.get("player_info", {}).get("playerName"))
+
+    if not pid or not pname:
+        st.error("Could not resolve player from session. Ensure login sets 'player_id' and 'player_name' (or player_info dict).")
+        st.stop()
+
+    return str(pid), str(pname)
+
+
+# >>> Call the resolver BEFORE using player_name <<<
+player_id, player_name = resolve_current_player(is_staff)
 
 # Page title
 
@@ -306,12 +321,9 @@ player_position = get_player_position(player_data, event_data, player_id, player
 
 # Get Metrics
 
-metrics_summary = process_player_metrics(
-    player_stats=player_stats,
-    event_data=event_data,
-    player_id=player_id,
-    player_name=player_name
-)
+metrics_summary = process_player_metrics(player_stats, event_data, player_id, player_name)
+
+
 
 
 # Labels for all possible metrics (expanded for v3)
@@ -441,41 +453,113 @@ if not selected_kpis:
 # SIDE BAR
 st.sidebar.header("Time Filters")
 
-
+# ---------------------------
+# DATE JOIN + DELTAS + CARDS
+# ---------------------------
 
 def add_match_dates(df, match_data_df):
     """
-    Adds a 'matchDate' column to df based on matchId using match_data_df,
-    handles NaT and fallback for Streamlit compatibility.
-    Returns updated df and valid min/max dates as Python date objects.
+    Adds 'matchDate' to df by joining with match_data_df on matchId.
+    Robust to dtype mismatches and pre-existing matchDate columns.
+    Returns (df_with_dates, min_date, max_date) with Python date objects.
     """
-    # Parse match start dates safely
-    match_data_df["startDate"] = pd.to_datetime(match_data_df["startDate"], errors="coerce")
+    today = pd.Timestamp.today().date()
 
-    # Map matchId to parsed startDate
-    match_dates_dict = dict(zip(match_data_df["matchId"], match_data_df["startDate"]))
-    
-    df = df.copy()
-    df["matchDate"] = df["matchId"].map(match_dates_dict)
+    # Basic guards
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(), today, today
+    if not isinstance(match_data_df, pd.DataFrame) or match_data_df.empty:
+        out = df.copy()
+        out["matchDate"] = pd.NaT
+        return out, today, today
 
-    # Drop rows with missing matchDate
-    df = df.dropna(subset=["matchDate"])
+    # Work on copies
+    left = df.copy()
+    right = match_data_df.copy()
 
-    if df.empty:
-        today = pd.Timestamp.today().date()
-        return df, today, today
+    # ❕Drop any pre-existing matchDate on the left to avoid duplicate labels later
+    if "matchDate" in left.columns:
+        left = left.drop(columns=["matchDate"])
 
-    min_date = df["matchDate"].min()
-    max_date = df["matchDate"].max()
+    # Pick a usable date column
+    date_col = None
+    for c in ["startDate", "date", "kickoff", "matchDate"]:
+        if c in right.columns:
+            date_col = c
+            break
+    if date_col is None:
+        out = left.copy()
+        out["matchDate"] = pd.NaT
+        return out, today, today
 
-    # Ensure Python date objects (not pandas Timestamp)
-    min_date = min_date.date() if pd.notnull(min_date) else pd.Timestamp.today().date()
-    max_date = max_date.date() if pd.notnull(max_date) else pd.Timestamp.today().date()
+    # Parse dates
+    right[date_col] = pd.to_datetime(right[date_col], errors="coerce")
 
-    return df, min_date, max_date
+    # De-dupe match_data (keep latest non-null date per match)
+    if "matchId" in right.columns:
+        right = (
+            right.sort_values(date_col)
+                 .drop_duplicates(subset=["matchId"], keep="last")
+        )
+
+    # ---- Normalize matchId on both sides ----
+    def normalize_match_id(s: pd.Series) -> pd.Series:
+        s = s.copy()
+        num = pd.to_numeric(s, errors="coerce")
+        if (num.notna().mean() >= 0.8):
+            return num.astype("Int64")
+        return s.astype(str).str.strip()
+
+    if "matchId" not in left.columns or "matchId" not in right.columns:
+        out = left.copy()
+        out["matchDate"] = pd.NaT
+        return out, today, today
+
+    left["_matchIdKey"] = normalize_match_id(left["matchId"])
+    right["_matchIdKey"] = normalize_match_id(right["matchId"])
+
+    # Merge right date into left
+    out = left.merge(
+        right[["_matchIdKey", date_col]],
+        on="_matchIdKey",
+        how="left"
+    ).rename(columns={date_col: "matchDate"})
+
+    # If duplicates somehow appeared, collapse to a single 'matchDate'
+    if (out.columns == "matchDate").sum() > 1:
+        md = out.loc[:, out.columns == "matchDate"]
+        # Keep the last one (usually the freshly merged right-hand date)
+        out["matchDate"] = md.iloc[:, -1]
+        # Drop the others
+        keep_mask = np.ones(len(out.columns), dtype=bool)
+        seen = 0
+        for i, col in enumerate(out.columns):
+            if col == "matchDate":
+                seen += 1
+                if seen < (md.shape[1] + 1):  # drop prior duplicates
+                    keep_mask[i] = (seen == (md.shape[1] + 1))
+        out = out.loc[:, keep_mask]
+
+    # Diagnostics (safe)
+    try:
+        null_rate = out["matchDate"].isna().mean()
+        st.caption(f"🔎 matchId join coverage: {(1 - null_rate):.0%} matched")
+    except Exception:
+        null_rate = 1.0
+
+    # Compute min/max over valid dates
+    valid_dates = out["matchDate"].dropna()
+    if valid_dates.empty:
+        return out, today, today
+
+    min_date = valid_dates.min().date()
+    max_date = valid_dates.max().date()
+
+    return out, min_date, max_date
 
 
-# DELTAS
+
+# ---- DELTAS ----
 
 def calculate_delta(filtered_df: pd.DataFrame, full_df: pd.DataFrame, column: str) -> Tuple[float, float]:
     """
@@ -509,19 +593,19 @@ def calculate_delta(filtered_df: pd.DataFrame, full_df: pd.DataFrame, column: st
 
             filtered_value = (filtered_num / filtered_denom) * 100 if filtered_denom != 0 else 0
             season_value = (season_num / season_denom) * 100 if season_denom != 0 else 0
-        except:
+        except Exception:
             filtered_value = filtered_df[column].mean()
             season_value = full_df[column].mean()
 
     elif metric_type == "percentage":
-        # Fallback: average the values
+        # Fallback: average the values if we don't know the exact formula
         filtered_value = filtered_df[column].mean()
         season_value = full_df[column].mean()
 
     else:
         # For count metrics: average per match
-        filtered_value = filtered_df[column].sum() / len(filtered_df)
-        season_value = full_df[column].sum() / len(full_df)
+        filtered_value = filtered_df[column].sum() / max(1, len(filtered_df))
+        season_value  = full_df[column].sum() / max(1, len(full_df))
 
     delta = filtered_value - season_value
     delta_percent = (delta / season_value * 100) if season_value != 0 else 0
@@ -529,8 +613,7 @@ def calculate_delta(filtered_df: pd.DataFrame, full_df: pd.DataFrame, column: st
     return round(delta, 1), round(delta_percent, 1)
 
 
-#Metric Card    
-
+# ---- METRIC CARD ----
 
 def format_metric_value(value, column):
     """
@@ -540,17 +623,15 @@ def format_metric_value(value, column):
     - Count-based metrics: integer
     """
     metric_type = metric_type_map.get(column, "per_match")
-
     if pd.isnull(value):
         return "0"
-
     if metric_type == "percentage":
         return f"{value:.1f}"
     elif column in ["xG", "xA", "ps_xG", "progressive_passes", "progressive_carry_distance"]:
         return f"{value:.2f}"
     else:
         return f"{int(round(value))}"
-    
+
 
 def display_metric_card(col, title, value, filtered_df, full_df, column, color=None):
     with col:
@@ -587,10 +668,9 @@ def display_metric_card(col, title, value, filtered_df, full_df, column, color=N
                 tooltip_lines.append(f"Avg Match Filtered: {match_avg:.1f}%")
 
             elif column in full_df.columns:
-                season_avg = full_df[column].sum() / len(full_df)
-                match_avg = filtered_df[column].sum() / len(filtered_df)
+                season_avg = full_df[column].sum() / max(1, len(full_df))
+                match_avg = filtered_df[column].sum() / max(1, len(filtered_df))
                 suffix = "%" if metric_type == "percentage" else ""
-
                 tooltip_lines.append(f"Avg Season: {season_avg:.1f}{suffix}")
                 tooltip_lines.append(f"Avg Match: {match_avg:.1f}{suffix}")
 
@@ -615,36 +695,88 @@ def display_metric_card(col, title, value, filtered_df, full_df, column, color=N
                 unsafe_allow_html=True
             )
 
-# -- Apply match dates to player metrics
-metrics_summary, min_date, max_date = add_match_dates(metrics_summary, match_data)
 
-# -- Get default range from last 5 games
-if not metrics_summary.empty:
-    last_5_games = metrics_summary.sort_values("matchDate").drop_duplicates("matchId").tail(5)
-    default_start_date = last_5_games["matchDate"].min().date() if pd.notnull(last_5_games["matchDate"].min()) else min_date
-    default_end_date = last_5_games["matchDate"].max().date() if pd.notnull(last_5_games["matchDate"].max()) else max_date
-else:
-    default_start_date = min_date
-    default_end_date = max_date
+# ---------------------------
+# WIRE DATES + SIDEBAR FILTER
+# ---------------------------
 
-# -- Date selectors with safe defaults
-start_date = st.sidebar.date_input("Start date", default_start_date, min_value=min_date, max_value=max_date)
-end_date = st.sidebar.date_input("End date", default_end_date, min_value=min_date, max_value=max_date)
+# 0) Normalize 'matchId' to nullable Int64 on BOTH frames
+def to_int64_id(s):
+    # convert strings/floats like "12345" / 12345.0 → 12345 (Int64), keep NaN as <NA>
+    return pd.to_numeric(s, errors="coerce").astype("Int64")
 
-# -- Filter data based on selected date range
-mask = (
-    (metrics_summary["matchDate"].dt.date >= start_date) &
-    (metrics_summary["matchDate"].dt.date <= end_date)
+# ensure column exists
+if "matchId" not in metrics_summary.columns:
+    st.error(f"'matchId' missing in metrics_summary. Columns: {list(metrics_summary.columns)}")
+    st.stop()
+if "matchId" not in match_data.columns:
+    st.error(f"'matchId' missing in match_data. Columns: {list(match_data.columns)}")
+    st.stop()
+
+metrics_summary = metrics_summary.copy()
+match_data = match_data.copy()
+
+metrics_summary["matchId"] = to_int64_id(metrics_summary["matchId"])
+match_data["matchId"]      = to_int64_id(match_data["matchId"])
+
+# 1) Parse date column once
+if "startDate" not in match_data.columns:
+    st.error("match_data is missing 'startDate'.")
+    st.stop()
+match_data["startDate"] = pd.to_datetime(match_data["startDate"], errors="coerce")
+
+# 2) De-dupe match_data (just in case) and attach matchDate via merge
+md_dates = (
+    match_data[["matchId", "startDate"]]
+    .dropna(subset=["matchId"])
+    .sort_values("startDate")
+    .drop_duplicates(subset=["matchId"], keep="last")
+    .rename(columns={"startDate": "matchDate"})
 )
-filtered_df = metrics_summary.loc[mask].sort_values("matchDate")
+
+metrics_summary = (
+    metrics_summary
+    .merge(md_dates, on="matchId", how="left")
+)
+
+# 3) Validate we actually matched
+non_null_rate = metrics_summary["matchDate"].notna().mean() if "matchDate" in metrics_summary else 0.0
+st.caption(f"🔎 matchId→date match coverage: {non_null_rate:.0%}")
+
+if non_null_rate == 0:
+    st.error("No match dates matched. Likely mismatch in matchId values between frames.")
+    st.write("metrics_summary sample:", metrics_summary[["matchId"]].head())
+    st.write("match_data sample:", match_data[["matchId", "startDate"]].head())
+    st.stop()
+
+# 4) Sidebar range
+valid_dates = metrics_summary["matchDate"].dropna()
+min_date = valid_dates.min().date()
+max_date = valid_dates.max().date()
+
+st.sidebar.header("Time Filters")
+picked = st.sidebar.date_input(
+    "Select date range",
+    value=(min_date, max_date),
+    min_value=min_date,
+    max_value=max_date
+)
+start_date, end_date = picked if isinstance(picked, tuple) and len(picked) == 2 else (min_date, max_date)
+
+# 5) Filter
+mask = (metrics_summary["matchDate"].dt.date >= start_date) & (metrics_summary["matchDate"].dt.date <= end_date)
+filtered_df = metrics_summary.loc[mask].copy()
+if filtered_df.empty:
+    st.warning("No matches in the selected date range. Showing season totals instead.")
+    filtered_df = metrics_summary.copy()
+
+
 
 # -- Dynamically assigned KPIs
 metric_keys = selected_kpis
 
 # --- Native Watford-Styled Section Selector ---
-
 st.sidebar.header("Select Visualization")
-
 section = st.sidebar.radio(
     "Go to section:",
     options=["Overview Stats", "Trends Stats", "Player Comparison"],
@@ -654,44 +786,65 @@ section = st.sidebar.radio(
 
 # --- Player Info Section (always at top)
 
+# Normalize IDs to avoid empty filters due to dtype mismatches
+player_data = player_data.copy()
+player_data["playerId"] = pd.to_numeric(player_data["playerId"], errors="coerce").astype("Int64")
+_pid = pd.to_numeric(player_id, errors="coerce")
+
 # Extract player static details (only once)
-filtered_player_data = player_data[player_data["playerId"] == player_id]
+filtered_player_data = player_data[player_data["playerId"] == _pid]
 
 if filtered_player_data.empty:
-    st.error(f"🚨 No player data found for playerId: {player_id}")
-    st.stop()
+    st.warning(
+        "No rows matched for this player in player_data after ID normalization. "
+        "Showing the first available row as a fallback."
+    )
+    # Helpful debug info:
+    st.caption(f"player_id (incoming) → {_pid} (type: {type(_pid)})")
+    st.caption(f"Unique playerIds in player_data (head): {list(player_data['playerId'].dropna().unique()[:5])}")
+    # Fallback to first row to avoid crash; adjust if you prefer to stop instead.
+    player_info = player_data.iloc[0]
 else:
     player_info = filtered_player_data.iloc[0]
 
-age = player_info["age"]
-shirt_number = player_info["shirtNo"]
-height = player_info["height"]
-weight = player_info["weight"]
-team_name = player_info["teamName"]
+age          = player_info.get("age", None)
+shirt_number = player_info.get("shirtNo", None)
+height       = player_info.get("height", None)
+weight       = player_info.get("weight", None)
+team_name    = player_info.get("teamName", None)
 
 # --- Now dynamic stats based on time filter (start_date, end_date)
 
-# 1. Merge player_data with match_data
-filtered_logged_player_info = pd.merge(
-    player_data,
-    match_data[["matchId", "startDate"]],
-    on="matchId",
-    how="left"
+# 1. Merge player_data with match_data (bring in dates)
+md = match_data.copy()
+if "matchId" in md.columns:
+    md["matchId"] = pd.to_numeric(md["matchId"], errors="coerce").astype("Int64")
+if "startDate" in md.columns:
+    md["startDate"] = pd.to_datetime(md["startDate"], errors="coerce")
+
+filtered_logged_player_info = (
+    player_data.merge(md[["matchId", "startDate"]], on="matchId", how="left")
 )
 
-filtered_logged_player_info["startDate"] = pd.to_datetime(filtered_logged_player_info["startDate"], errors="coerce")
+# 2. Apply player ID and date filter (guard for missing dates)
+has_dates = "startDate" in filtered_logged_player_info.columns
+if has_dates:
+    filtered_logged_player_info = filtered_logged_player_info[
+        (filtered_logged_player_info["playerId"] == _pid) &
+        (filtered_logged_player_info["startDate"].notna()) &
+        (filtered_logged_player_info["startDate"].dt.date >= start_date) &
+        (filtered_logged_player_info["startDate"].dt.date <= end_date)
+    ]
+else:
+    st.warning("No startDate column available after merge; using all rows for this player.")
+    filtered_logged_player_info = filtered_logged_player_info[
+        (filtered_logged_player_info["playerId"] == _pid)
+    ]
 
-# 2. Apply player ID and date filter
-filtered_logged_player_info = filtered_logged_player_info[
-    (filtered_logged_player_info["playerId"] == player_id) &
-    (filtered_logged_player_info["startDate"].dt.date >= start_date) &
-    (filtered_logged_player_info["startDate"].dt.date <= end_date)
-]
-
-# 3. Now calculate correctly
-games_played = filtered_logged_player_info.shape[0]
-games_as_starter = filtered_logged_player_info["isFirstEleven"].sum()
-total_minutes = filtered_logged_player_info["minutesPlayed"].sum()
+# 3. Totals within the selected window
+games_played     = int(filtered_logged_player_info.shape[0])
+games_as_starter = int(pd.to_numeric(filtered_logged_player_info.get("isFirstEleven", 0), errors="coerce").fillna(0).sum())
+total_minutes    = float(pd.to_numeric(filtered_logged_player_info.get("minutesPlayed", 0), errors="coerce").fillna(0).sum())
 
 # --- Labels and Values for display
 labels = [
@@ -700,10 +853,10 @@ labels = [
 ]
 values = [
     age, shirt_number, height, weight,
-    games_played, int(games_as_starter), int(total_minutes)
+    games_played, games_as_starter, int(round(total_minutes))
 ]
 
-# --- Styled Player Info Cards (your custom HTML)
+# --- Styled Player Info Cards
 with st.container():
     info_cols = st.columns(len(labels))
     for i, (label, value) in enumerate(zip(labels, values)):
@@ -744,26 +897,36 @@ if section == "Overview Stats":
     </div>
     """, unsafe_allow_html=True)
    
-
     # Merge team names into metrics_summary
     teams_info = (
         event_data.groupby("matchId")[["teamName", "oppositionTeamName"]]
         .first()
         .reset_index()
     )
+
     summary_df = metrics_summary.copy()
     summary_df = summary_df.merge(teams_info, on="matchId", how="left")
 
-    # Add match dates
+    # Prevent duplicate 'matchDate' before wiring dates
+    if "matchDate" in summary_df.columns:
+        summary_df = summary_df.drop(columns=["matchDate"])
+
+    # Add match dates ONCE
     summary_df, _, _ = add_match_dates(summary_df, match_data)
+
+    # Sort by date
     summary_df = summary_df.sort_values("matchDate")
 
     # Apply global date filter (set earlier)
-    mask = (summary_df["matchDate"].dt.date >= start_date) & (summary_df["matchDate"].dt.date <= end_date)
-    filtered_df = summary_df[mask].copy()
+    mask = (
+        (summary_df["matchDate"].dt.date >= start_date) &
+        (summary_df["matchDate"].dt.date <= end_date)
+    )
+    filtered_df = summary_df.loc[mask].copy()
 
     # Drop duplicated matchId and fill NaNs
     filtered_df = filtered_df.drop_duplicates(subset="matchId", keep="last").fillna(0)
+
     
     # Ensure team names are merged
     if "oppositionTeamName" not in filtered_df.columns:
@@ -1011,47 +1174,86 @@ elif section == "Player Comparison":
 
     st.info(f"Top Players in the Competition – **{player_position}**")
 
-    # Step 1: Load All Match Data for Selected Season
-    selected_season = "2024-2025"  # Customize as needed
-    engine = connect_to_db()
+    # ---------------------------
+    # Step 0: normalize team_data schema (snake_case → camelCase)
+    # ---------------------------
+    team_data_cmp = team_data.copy()
+    team_data_cmp = team_data_cmp.rename(columns={
+        "match_id": "matchId",
+        "team_id": "teamId",
+        "team_name": "teamName"
+    })
 
-    # Load all Championship matches for the selected season
+    # helpful dtype normalizer for ids
+    def to_int64_id(s):
+        return pd.to_numeric(s, errors="coerce").astype("Int64")
+
+    if "matchId" not in team_data_cmp.columns or "teamId" not in team_data_cmp.columns:
+        st.error("team_data is missing matchId/teamId (after renaming). Check TEAM_DATA schema load.")
+        st.stop()
+
+    team_data_cmp["matchId"] = to_int64_id(team_data_cmp["matchId"])
+    team_data_cmp["teamId"]  = to_int64_id(team_data_cmp["teamId"])
+
+    # ---------------------------
+    # Step 1: load season matches
+    # ---------------------------
+    selected_season = "2024-2025"
+    engine = connect_to_db()
     season_matches = pd.read_sql(
-    """
-    SELECT * FROM match_data
-    WHERE season = %s AND competition = 'eng-championship'
-    """,
-    con=engine,
-    params=(selected_season,)
+        """
+        SELECT * FROM match_data
+        WHERE season = %s AND competition = 'eng-championship'
+        """,
+        con=engine,
+        params=(selected_season,)
     )
 
-   # Step 2: Clean and split score column
-    # Clean and split the score column safely
-    season_matches["score_clean"] = season_matches["score"].astype(str).str.strip().str.replace(" ", "", regex=False)
+    # Make sure matchId is comparable with team_data_cmp
+    if "matchId" not in season_matches.columns:
+        st.error("match_data returned without matchId. Check match_data schema.")
+        st.stop()
+    season_matches["matchId"] = to_int64_id(season_matches["matchId"])
 
-    # Only keep rows like "2:1"
+    # ---------------------------
+    # Step 2: score parsing (robust + non-blocking)
+    # ---------------------------
+    season_matches["score_clean"] = (
+        season_matches["score"].astype(str).str.strip().str.replace(" ", "", regex=False)
+    )
     valid_scores = season_matches["score_clean"].str.contains(r"^\d+:\d+$", na=False)
+    clean_scores = season_matches.loc[valid_scores, "score_clean"]
 
-    # Drop NaNs and ensure format is safe to split
-    clean_scores = season_matches.loc[valid_scores, "score_clean"].dropna()
-
-    # ✅ Split with expand=True and ensure result is a DataFrame
-    score_split = clean_scores.str.split(":", expand=True)
-
-    # ✅ Check if score_split is valid (has 2 columns)
-    if score_split.shape[1] < 2:
-        st.error("❌ Score splitting failed — format not consistent with '1:0'")
+    if clean_scores.empty:
+        st.warning("No valid scores in season_matches — points table may be empty.")
+        season_matches["home_goals"] = pd.NA
+        season_matches["away_goals"] = pd.NA
     else:
-        # Assign safely
-        season_matches.loc[clean_scores.index, "home_goals"] = pd.to_numeric(score_split.iloc[:, 0], errors="coerce")
-        season_matches.loc[clean_scores.index, "away_goals"] = pd.to_numeric(score_split.iloc[:, 1], errors="coerce")
+        score_split = clean_scores.str.split(":", expand=True)
+        if score_split.shape[1] < 2:
+            st.error("❌ Score splitting failed — format not consistent with '1:0'")
+            season_matches["home_goals"] = pd.NA
+            season_matches["away_goals"] = pd.NA
+        else:
+            season_matches.loc[clean_scores.index, "home_goals"] = pd.to_numeric(score_split.iloc[:, 0], errors="coerce")
+            season_matches.loc[clean_scores.index, "away_goals"] = pd.to_numeric(score_split.iloc[:, 1], errors="coerce")
 
-    
-    # Step 3: Filter team_data by matchIds
-    filtered_match_ids = season_matches["matchId"].unique().tolist()
-    team_data_filtered = team_data[team_data["matchId"].isin(filtered_match_ids)].copy()
+    # ---------------------------
+    # Step 3: filter team_data by matchIds (now using normalized columns)
+    # ---------------------------
+    filtered_match_ids = season_matches["matchId"].dropna().unique().tolist()
+    if not filtered_match_ids:
+        st.warning("No season match IDs found for the selected season.")
+        st.stop()
 
-    # Step 4: Merge scores into team_data
+    team_data_filtered = team_data_cmp[team_data_cmp["matchId"].isin(filtered_match_ids)].copy()
+    if team_data_filtered.empty:
+        st.warning("team_data has no rows for these matches.")
+        st.stop()
+
+    # ---------------------------
+    # Step 4: merge scores into team_data
+    # ---------------------------
     team_scores_df = pd.merge(
         team_data_filtered,
         season_matches[["matchId", "home_goals", "away_goals", "score"]],
@@ -1059,20 +1261,29 @@ elif section == "Player Comparison":
         how="inner"
     )
 
-    # Step 5: Infer home/away by order within matchId
+    # ---------------------------
+    # Step 5: infer home/away by order within matchId
+    # ---------------------------
     team_scores_df["team_order"] = team_scores_df.groupby("matchId").cumcount()
     team_scores_df["home_away"] = team_scores_df["team_order"].map({0: "home", 1: "away"})
 
-    # Step 6: Assign points
+    # ---------------------------
+    # Step 6: assign points
+    # ---------------------------
     def assign_points(row):
+        hg, ag = row["home_goals"], row["away_goals"]
+        if pd.isna(hg) or pd.isna(ag):
+            return 0  # or pd.NA if you prefer
         if row["home_away"] == "home":
-            return 3 if row["home_goals"] > row["away_goals"] else 1 if row["home_goals"] == row["away_goals"] else 0
+            return 3 if hg > ag else 1 if hg == ag else 0
         else:
-            return 3 if row["away_goals"] > row["home_goals"] else 1 if row["away_goals"] == row["home_goals"] else 0
+            return 3 if ag > hg else 1 if ag == hg else 0
 
     team_scores_df["points"] = team_scores_df.apply(assign_points, axis=1)
 
-    # Step 7: Aggregate total points per team
+    # ---------------------------
+    # Step 7: aggregate total points per team
+    # ---------------------------
     team_points = (
         team_scores_df
         .groupby(["teamId", "teamName"], as_index=False)["points"]
@@ -1080,7 +1291,9 @@ elif section == "Player Comparison":
         .sort_values(by="points", ascending=False)
     )
 
-    # Step 8: Select top 5 teams
+    # ---------------------------
+    # Step 8: select top 5 teams
+    # ---------------------------
     top_5_teams = team_points.head(5)
     top_team_ids = top_5_teams["teamId"].tolist()
     top_5_team_names = top_5_teams["teamName"].tolist()
@@ -1439,4 +1652,3 @@ elif section == "Player Comparison":
 
     st.expander("### Players Stats KPI Comparison")
     st.dataframe(summary_metrics_df, use_container_width=True)
-
