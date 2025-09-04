@@ -108,22 +108,75 @@ percentage_formula_map = {
     }
 
 def connect_to_db():
-    load_dotenv()
-
-    user = os.getenv("DB_USER")
-    password = os.getenv("DB_PASSWORD")
-    host = os.getenv("DB_HOST")
-    port = os.getenv("DB_PORT")
-    database = os.getenv("DB_NAME")
-
-    if not all([user, password, host, port, database]):
-        st.error("Database credentials are missing.")
-        return None
-
-    connection_string = f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}?charset=utf8"
+    """
+    Establish a connection to the database with detailed error handling.
     
-    engine = create_engine(connection_string)
-    return engine
+    Returns:
+        SQLAlchemy engine if connection is successful, None otherwise.
+    """
+    try:
+        # Load environment variables
+        load_dotenv()
+
+        # Get database credentials
+        user = os.getenv("DB_USER")
+        password = os.getenv("DB_PASSWORD")
+        host = os.getenv("DB_HOST")
+        port = os.getenv("DB_PORT")
+        database = os.getenv("DB_NAME")
+
+        # Check for missing credentials
+        missing = []
+        if not user: missing.append("DB_USER")
+        if not password: missing.append("DB_PASSWORD")
+        if not host: missing.append("DB_HOST")
+        if not port: missing.append("DB_PORT")
+        if not database: missing.append("DB_NAME")
+        
+        if missing:
+            error_msg = f"Missing required database credentials: {', '.join(missing)}\n"
+            error_msg += f"Please check your .env file in: {os.path.abspath('.env')}"
+            st.error(error_msg)
+            return None
+
+        # Escape special characters in password
+        safe_password = password.replace('*', '%2A')
+
+        # Create connection string (without password for logging)
+        conn_str = f"mysql+pymysql://{user}:*****@{host}:{port}/{database}"
+        
+        try:
+            # Create engine with connection test
+            engine = create_engine(f"mysql+pymysql://{user}:{safe_password}@{host}:{port}/{database}")
+            
+            # Test the connection
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+                
+            st.success("✅ Successfully connected to the database")
+            return engine
+            
+        except Exception as e:
+            error_type = type(e).__name__
+            error_msg = f"❌ Failed to connect to database:\n"
+            error_msg += f"Connection string: {conn_str.replace(safe_password, '*****')}\n\n"
+            error_msg += f"Error Type: {error_type}\n"
+            error_msg += f"Error Details: {str(e)}\n\n"
+            error_msg += "Troubleshooting steps:\n"
+            error_msg += "1. Verify the database server is running\n"
+            error_msg += "2. Check if the credentials in .env are correct\n"
+            error_msg += "3. Verify the database user has proper permissions\n"
+            error_msg += "4. Check if the database exists and is accessible\n"
+            error_msg += "5. Verify the MySQL server allows remote connections if applicable"
+            
+            st.error(error_msg)
+            st.exception(e)  # This will show the full traceback in the Streamlit UI
+            return None
+            
+    except Exception as e:
+        st.error(f"❌ Unexpected error while setting up database connection: {str(e)}")
+        st.exception(e)
+        return None
 
 
 def clean_numeric_columns(df):
@@ -137,345 +190,573 @@ def clean_numeric_columns(df):
 
 def get_player_position(player_data_df, event_data_df, player_id, player_name):
     """
-    Returns the dominant position for a player. If 'Sub', finds the most frequent real position played using event_data.
+    Returns the dominant position for a player. If 'Sub', finds the most frequent real position
+    using event_data. Uses safe dtype normalization to avoid empty selections.
     """
+
     position_map = {
-    "GK": "Goalkeeper",
+        "GK": "Goalkeeper",
+        "DC": "Center Back",
+        "DMC": "Defensive Midfielder",
+        "DL": "Left Back",
+        "DML": "Left Back",
+        "DR": "Right Back",
+        "DMR": "Right Back",
+        "MC": "Midfielder",
+        "ML": "Midfielder",
+        "MR": "Midfielder",
+        "AMC": "Attacking Midfielder",
+        "AML": "Left Winger",
+        "FWL": "Left Winger",
+        "AMR": "Right Winger",
+        "FWR": "Right Winger",
+        "FW": "Striker",
+        "Sub": "Substitute",
+    }
 
-    "DC": "Center Back",
-    "DMC": "Defensive Midfielder",
-    "DL": "Left Back",
-    "DML": "Left Back",
-    "DR": "Right Back",
-    "DMR": "Right Back",
-
-    "MC": "Midfielder",
-    "ML": "Midfielder",
-    "MR": "Midfielder",
-
-    "AMC": "Attacking Midfielder",
-    "AML": "Left Winger",
-    "FWL": "Left Winger",
-
-    "AMR": "Right Winger",
-    "FWR": "Right Winger",
-
-    "FW": "Striker",
-
-    "Sub": "Substitute"
-}
-
+    # ---- normalize types to compare reliably
+    pid_str = str(player_id)
     try:
-        raw_position = player_data_df[player_data_df["playerId"] == player_id]["position"].values[0]
-    except IndexError:
-        return "Unknown"
+        pdd = player_data_df.copy()
+        pdd["playerId"] = pdd["playerId"].astype(str)
+    except Exception:
+        return "Midfielder"
 
-    # If not Sub, return mapped position
-    if raw_position != "Sub":
-        return position_map.get(raw_position, "Unknown")
+    # 1) Try player_data.position first
+    try:
+        raw_position = (
+            pdd.loc[pdd["playerId"] == pid_str, "position"]
+            .dropna()
+            .astype(str)
+            .values[0]
+        )
+    except Exception:
+        raw_position = None
 
-    # Sub: find most frequent real position, excluding 'Sub'
-    df = event_data_df.copy()
-    df = df[(df["playerId"] == player_id) & (df["position"].notnull()) & (df["position"] != "Sub")]
+    if raw_position and raw_position != "Sub":
+        return position_map.get(raw_position, "Midfielder")
 
-    if df.empty:
-        return "Unknown"
+    # 2) If 'Sub' or missing, infer from events
+    try:
+        edd = event_data_df.copy()
+        edd["playerId"] = edd["playerId"].astype(str)
+        edd = edd[(edd["playerId"] == pid_str)]
+        if "position" in edd.columns:
+            edd = edd[edd["position"].notna() & (edd["position"] != "Sub")]
+            if not edd.empty:
+                most_common = edd["position"].astype(str).value_counts().idxmax()
+                return position_map.get(most_common, "Midfielder")
+    except Exception:
+        pass
 
-    most_common = df["position"].value_counts().idxmax()
-    return position_map.get(most_common, most_common)
+    # 3) Safe default
+    return "Midfielder"
+
 
 
 def process_player_metrics(player_stats, event_data, player_id, player_name):
     """
-    Cleans and computes performance metrics for the logged-in player, including extended KPIs
-    for all positions, with corrected Save % and Goals Conceded logic.
+    Aligns with your current schemas:
+    - player_stats: has passSuccess, tackleSuccess, etc. (percent values), plus base counts.
+    - event_data: no xG/xA columns; compute heuristic xG, ps_xG, and event KPIs.
+
+    Always returns a DataFrame (possibly empty).
     """
-
-    # Ensure player_id is int for filtering
+    # -------- Guards --------
     try:
-        player_id = int(player_id)
+        pid = int(player_id)
     except Exception as e:
-        st.error(f"🚨 player_id conversion to int failed: {e}")
+        st.error(f"🚨 player_id→int failed: {e}")
         return pd.DataFrame()
 
-    if player_stats is None or player_stats.empty:
-        st.error("🚨 No player stats available for this player.")
+    if not isinstance(player_stats, pd.DataFrame) or player_stats.empty:
+        st.error("🚨 No player_stats available.")
         return pd.DataFrame()
 
-    if event_data is None or event_data.empty:
-        st.error("🚨 No event data available for this player.")
+    if not isinstance(event_data, pd.DataFrame) or event_data.empty:
+        st.error("🚨 No event_data available.")
         return pd.DataFrame()
 
-    # --- Step 1: Filter ---
-    # Convert playerId to int to match player_id type
-    player_stats["playerId"] = player_stats["playerId"].astype(int)
-    player_stats = player_stats[player_stats["playerId"] == player_id].copy()
+    ps = player_stats.copy()
+    ev = event_data.copy()
 
-    # For event_data playerId, keep as int or convert to int before filter (depends on original dtype)
-    if event_data["playerId"].dtype != int:
-        event_data["playerId"] = event_data["playerId"].astype(int)
-    event_data_player = event_data[
-        (event_data["playerId"] == player_id) &
-        (event_data["playerName"].str.lower().str.contains(player_name.lower(), na=False))
-    ].copy()
+    # Required columns
+    for c in ["playerId", "matchId"]:
+        if c not in ps.columns:
+            st.error(f"🚨 player_stats missing '{c}'")
+            return pd.DataFrame()
+    if "playerId" not in ev.columns: ev["playerId"] = np.nan
+    if "matchId"  not in ev.columns: ev["matchId"]  = np.nan
 
-    # --- Step 2: Clean numeric columns ---
-    metric_cols = player_stats.columns.drop(
-        ['playerId', 'playerName', 'matchId', 'field', 'teamId', 'teamName'],
-        errors='ignore'
-    )
-    for col in metric_cols:
-        player_stats[col] = player_stats[col].astype(str).str.replace(',', '.', regex=False)
-        player_stats[col] = pd.to_numeric(player_stats[col], errors='coerce')
+    # -------- Normalize IDs --------
+    ps["playerId"] = pd.to_numeric(ps["playerId"], errors="coerce").astype("Int64")
+    ps["matchId"]  = pd.to_numeric(ps["matchId"],  errors="coerce").astype("Int64")
+    ev["playerId"] = pd.to_numeric(ev["playerId"], errors="coerce").astype("Int64")
+    ev["matchId"]  = pd.to_numeric(ev["matchId"],  errors="coerce").astype("Int64")
 
-    for col in ['x', 'y', 'value_PassEndX', 'value_PassEndY', 'endX', 'endY', 'value_Length', 'xG', 'xA', 'ps_xG']:
-        if col in event_data.columns:
-            event_data[col] = event_data[col].astype(str).str.replace(',', '.', regex=False)
-            event_data[col] = pd.to_numeric(event_data[col], errors='coerce')
+    # Filter to this player
+    ps = ps[ps["playerId"] == pid].copy()
+    # Use only playerId for filtering events (names can differ in casing/spacing)
+    ev_player = ev[ev["playerId"] == pid].copy()
 
-    # --- Step 3: Event-based metrics ---
-    def calculate_event_metrics(df):
+    # Quick diagnostics (optional)
+    try:
+        st.caption(f"📦 player_stats rows (player): {len(ps)} | event_data rows (player): {len(ev_player)}")
+    except Exception:
+        pass
+
+    # If no rows after filtering, return empty DF with expected join keys
+    if ps.empty:
+        return pd.DataFrame(columns=["playerId","matchId"]).astype({"playerId":"Int64","matchId":"Int64"})
+
+    # -------- Clean numeric columns in player_stats --------
+    # Convert any decimal strings to numeric
+    for col in ps.columns:
+        if ps[col].dtype == object:
+            ps[col] = pd.to_numeric(ps[col].astype(str).str.replace(',', '.', regex=False), errors="ignore")
+
+    # -------- Event metrics (with heuristic xG / ps_xG) --------
+    def calculate_event_metrics(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["playerId","matchId"]).astype({"playerId":"Int64","matchId":"Int64"})
+
         df = df.copy()
 
-        # --- Standard event-based metrics ---
-        passes_into_penalty_area = df[
-            (df['value_PassEndX'] >= 88.5) & (df['value_PassEndY'].between(13.6, 54.4))
-        ].groupby(['playerId', 'matchId']).size().rename('passes_into_penalty_area')
+        # Ensure fields exist with correct dtypes
+        for c in ["x","y","endX","endY","value_Length","value_PassEndX","value_PassEndY"]:
+            if c not in df.columns: df[c] = np.nan
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-        carries_into_final_third = df[
-            (df['x'] < 66.7) & (df['endX'] >= 66.7)
-        ].groupby(['playerId', 'matchId']).size().rename('carries_into_final_third')
+        # Binary flags (coerce to 0/1)
+        bin_cols = [
+            "isShot","isGoal","value_Penalty","value_BigChance","value_OneOnOne",
+            "value_Head","value_LeftFoot","value_RightFoot",
+            "value_LowLeft","value_LowRight","value_HighLeft","value_HighRight","value_HighCentre","value_LowCentre",
+            "value_ShotAssist","value_Cross","value_IntentionalGoalAssist"
+        ]
+        for c in bin_cols:
+            if c not in df.columns: df[c] = 0
+            df[c] = (df[c].astype(str).str.strip().str.lower()
+                     .replace({"true":"1","false":"0","yes":"1","no":"0"}))
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
 
-        carries_into_penalty_area = df[
-            (df['endX'] >= 88.5) & (df['endY'].between(13.6, 54.4))
-        ].groupby(['playerId', 'matchId']).size().rename('carries_into_penalty_area')
+        # Strings used for masks
+        for c in ["type_displayName","outcomeType_displayName","qualifiers"]:
+            if c not in df.columns: df[c] = ""
+            df[c] = df[c].astype(str)
 
-        goals = df[df['type_displayName'] == 'Goal'].groupby(['playerId', 'matchId']).size().rename('goals')
-        assists = df[df['value_IntentionalGoalAssist'] == 1].groupby(['playerId', 'matchId']).size().rename('assists')
-        crosses = df[df['value_Cross'] == 1].groupby(['playerId', 'matchId']).size().rename('crosses')
+        # Identify shots robustly
+        shot_mask = (
+            (df["isShot"] == 1) |
+            (df["type_displayName"].isin(["Shot","SavedShot","Goal","Miss","ShotOnPost"])) |
+            (df["outcomeType_displayName"].isin(["Saved","Goal","Off T","Post"]))
+        )
 
-        long_passes = df[df['value_Length'] >= 30]
-        long_passes_total = long_passes.groupby(['playerId', 'matchId']).size().rename('long_passes_total')
-        long_passes_success = long_passes[long_passes['outcomeType_displayName'] == 'Successful']\
-            .groupby(['playerId', 'matchId']).size().rename('long_passes_success')
-        long_pass_pct = (long_passes_success / long_passes_total.replace(0, np.nan) * 100).rename('long_pass_pct')
+        # Geometry heuristics on 0–100 pitch
+        dx = (100 - df["x"])
+        dy = (df["y"] - 50).abs()
+        dist = np.sqrt(np.square(dx) + np.square(dy))
+        angle = np.degrees(np.arctan2(5.5, dx.clip(lower=1e-6)))
+        in_six  = (df["endX"] >= 94)   & (df["endY"].between(44, 56))
+        in_box  = (df["endX"] >= 88.5) & (df["endY"].between(13.6, 54.4))
 
-        progressive_passes = df[
-            (df['type_displayName'] == 'Pass') &
-            (df['outcomeType_displayName'] == 'Successful') &
-            (df['value_Length'] >= 9.11) &
-            (df['x'] >= 35) &
-            (~df['qualifiers'].str.contains('CornerTaken|Freekick', na=False))
-        ].groupby(['playerId', 'matchId']).size().rename('progressive_passes')
+        # Heuristic xG
+        base_xg = np.where(in_six, 0.36,
+                    np.where(in_box & (dist < 8), 0.28,
+                    np.where(in_box & (dist < 12), 0.18,
+                    np.where(in_box & (dist < 18), 0.12,
+                    np.where(dist < 25, 0.06, 0.03)))))
+        base_xg = np.where(df["value_Penalty"] == 1, 0.76, base_xg)
+        base_xg = np.where(df["value_BigChance"] == 1, np.maximum(base_xg, 0.35), base_xg)
+        base_xg = np.where(df["value_OneOnOne"] == 1, base_xg + 0.10, base_xg)
+        base_xg = np.where(df["value_Head"] == 1, base_xg * 0.75, base_xg)
+        base_xg = np.where(angle < 15, base_xg * 0.70, base_xg)
+        base_xg = np.where(angle > 60, base_xg * 1.15, base_xg)
+        base_xg = np.where(~in_box, np.minimum(base_xg, 0.07), base_xg)
+        est_xg  = np.clip(base_xg, 0.01, 0.95)
+        est_xg  = np.where(shot_mask, est_xg, 0.0)
+
+        # ps_xG (post-shot)
+        on_target = df["type_displayName"].isin(["SavedShot","Goal"]) | (df["outcomeType_displayName"] == "Saved")
+        placement_mult = np.where(df["value_HighLeft"] | df["value_HighRight"], 1.25,
+                           np.where(df["value_LowLeft"] | df["value_LowRight"], 1.15,
+                           np.where(df["value_HighCentre"] | df["value_LowCentre"], 0.85, 1.00)))
+        goal_mask = (df["isGoal"] == 1) | (df["type_displayName"] == "Goal")
+        est_psxg  = np.where(on_target, est_xg * placement_mult, 0.0)
+        est_psxg  = np.where(goal_mask, est_psxg * 1.10, est_psxg)
+        est_psxg  = np.clip(est_psxg, 0.0, 1.2)
+
+        # Group helpers
+        def gsize(mask):
+            return df[mask].groupby(["playerId","matchId"]).size()
+
+        # Your KPIs from events
+        passes_into_pa = gsize((df["value_PassEndX"] >= 88.5) & (df["value_PassEndY"].between(13.6, 54.4))).rename("passes_into_penalty_area")
+        carries_ft     = gsize((df["x"] < 66.7) & (df["endX"] >= 66.7)).rename("carries_into_final_third")
+        carries_pa     = gsize((df["endX"] >= 88.5) & (df["endY"].between(13.6, 54.4))).rename("carries_into_penalty_area")
+
+        goals   = gsize(df["type_displayName"] == "Goal").rename("goals")
+        assists = gsize(df["value_IntentionalGoalAssist"] == 1).rename("assists")
+        crosses = gsize(df["value_Cross"] == 1).rename("crosses")
+
+        long_passes         = df[df["value_Length"] >= 30]
+        long_passes_total   = long_passes.groupby(["playerId","matchId"]).size().rename("long_passes_total")
+        long_passes_success = long_passes[long_passes["outcomeType_displayName"] == "Successful"] \
+                                .groupby(["playerId","matchId"]).size().rename("long_passes_success")
+        long_pass_pct       = (long_passes_success / long_passes_total.replace(0, np.nan) * 100).rename("long_pass_pct")
+
+        progressive_passes = gsize(
+            (df["type_displayName"] == "Pass") &
+            (df["outcomeType_displayName"] == "Successful") &
+            (df["value_Length"] >= 9.11) &
+            (df["x"] >= 35) &
+            (~df["qualifiers"].str.contains("CornerTaken|Freekick", na=False))
+        ).rename("progressive_passes")
 
         progressive_carry_distance = df[
-            (df['type_displayName'] == 'Carry') & ((df['endX'] - df['x']) >= 9.11)
-        ].assign(distance=lambda d: d['endX'] - d['x']) \
-        .groupby(['playerId', 'matchId'])['distance'].sum().rename('progressive_carry_distance')
+            (df["type_displayName"] == "Carry") & ((df["endX"] - df["x"]) >= 9.11)
+        ].assign(distance=lambda d: d["endX"] - d["x"]).groupby(["playerId","matchId"])["distance"].sum().rename("progressive_carry_distance")
 
-        def_actions_outside_box = df[
-            (df['x'] > 25) & df['type_displayName'].isin(['Tackle', 'Interception', 'Clearance'])
-        ].groupby(['playerId', 'matchId']).size().rename('def_actions_outside_box')
+        def_actions_ob = gsize((df["x"] > 25) & (df["type_displayName"].isin(["Tackle","Interception","Clearance"]))).rename("def_actions_outside_box")
+        recoveries     = gsize(df["type_displayName"] == "BallRecovery").rename("recoveries")
+        sca            = gsize(df["value_ShotAssist"] > 0).rename("shot_creation_actions")
 
-        recoveries = df[df['type_displayName'] == 'BallRecovery']\
-            .groupby(['playerId', 'matchId']).size().rename('recoveries')
+        # Heuristic xG/ps_xG/xA grouped
+        xg_series   = pd.Series(est_xg,  index=df.index, name="xG")
+        psxg_series = pd.Series(est_psxg,index=df.index, name="ps_xG")
+        xG    = xg_series[shot_mask].groupby([df.loc[shot_mask,"playerId"], df.loc[shot_mask,"matchId"]]).sum(min_count=1)
+        ps_xG = psxg_series[shot_mask].groupby([df.loc[shot_mask,"playerId"], df.loc[shot_mask,"matchId"]]).sum(min_count=1)
+        xA    = df.groupby(["playerId","matchId"])["value_ShotAssist"].sum(min_count=1).rename("xA")
 
-        shot_creation_actions = df[df['value_ShotAssist'] > 0].groupby(['playerId', 'matchId']).size().rename('shot_creation_actions')
+        gca = goals.add(assists, fill_value=0).rename("goal_creating_actions")
 
-        xG = df.groupby(['playerId', 'matchId'])['xG'].sum().rename('xG')
-        xA = df.groupby(['playerId', 'matchId'])['xA'].sum().rename('xA')
-        ps_xG = df.groupby(['playerId', 'matchId'])['ps_xG'].sum().rename('ps_xG')
+        # GK-style metrics
+        saves = gsize((df["type_displayName"] == "SavedShot") & (df["outcomeType_displayName"] == "Successful")).rename("saves")
+        sot_faced = gsize((df["isShot"] == 1) & (df["type_displayName"].isin(["SavedShot","Goal"]))).rename("shots_on_target_faced")
+        goals_conceded = gsize((df["isShot"] == 1) & (df["type_displayName"] == "Goal")).rename("goals_conceded")
 
-        goal_creating_actions = goals.add(assists, fill_value=0).rename("goal_creating_actions")
-
-        # --- ✅ Goalkeeper metrics for all players ---
-        saves = df[
-            (df["type_displayName"] == "SavedShot") &
-            (df["outcomeType_displayName"] == "Successful")
-        ].groupby(["playerId", "matchId"]).size().rename("saves")
-
-        shots_on_target_faced = df[
-            (df["isShot"] == 1) &
-            (df["type_displayName"].isin(["SavedShot", "Goal"]))
-        ].groupby(["playerId", "matchId"]).size().rename("shots_on_target_faced")
-
-        goals_conceded = df[
-            (df["isShot"] == 1) &
-            (df["type_displayName"] == "Goal")
-        ].groupby(["playerId", "matchId"]).size().rename("goals_conceded")
-
-        # --- ✅ Combine all ---
-        return pd.concat([
-            passes_into_penalty_area,
-            carries_into_final_third,
-            carries_into_penalty_area,
+        out = pd.concat([
+            passes_into_pa, carries_ft, carries_pa,
             goals, assists, crosses,
-            long_passes_total,
-            long_passes_success,
-            long_pass_pct,
-            progressive_passes,
-            progressive_carry_distance,
-            def_actions_outside_box,
-            recoveries,
-            shot_creation_actions,
-            goal_creating_actions,
+            long_passes_total, long_passes_success, long_pass_pct,
+            progressive_passes, progressive_carry_distance,
+            def_actions_ob, recoveries,
+            sca, gca,
             xG, xA, ps_xG,
-            saves,
-            shots_on_target_faced,
-            goals_conceded
+            saves, sot_faced, goals_conceded
         ], axis=1).fillna(0).reset_index()
 
+        # Ensure ids Int64
+        for c in ["playerId","matchId"]:
+            if c in out.columns:
+                out[c] = pd.to_numeric(out[c], errors="coerce").astype("Int64")
 
-    event_metrics = calculate_event_metrics(event_data_player)
+        return out
 
-    # --- Step 4: Ensure consistent data types before merge ---
-    # Keep playerId as int, but convert matchId to str for merging
-    player_stats["matchId"] = player_stats["matchId"].astype(str)
-    event_metrics["matchId"] = event_metrics["matchId"].astype(str)
+    event_metrics = calculate_event_metrics(ev_player)
 
-    # --- Step 5: Merge event and player stats ---
-    metrics_summary = pd.merge(player_stats, event_metrics, on=["playerId", "matchId"], how="left").fillna(0)
+    # -------- Merge on keys --------
+    metrics_summary = pd.merge(ps, event_metrics, on=["playerId","matchId"], how="left").fillna(0)
 
-    # --- Step 5: Derived KPIs ---
-    metrics_summary["pass_completion_pct"] = (metrics_summary["passesAccurate"] / metrics_summary["passesTotal"].replace(0, np.nan)) * 100
-    metrics_summary["aerial_duel_pct"] = (metrics_summary["aerialsWon"] / metrics_summary["aerialsTotal"].replace(0, np.nan)) * 100
-    metrics_summary["take_on_success_pct"] = (metrics_summary["dribblesWon"] / metrics_summary["dribblesAttempted"].replace(0, np.nan)) * 100
-    metrics_summary["shots_on_target_pct"] = (metrics_summary["shotsOnTarget"] / metrics_summary["shotsTotal"].replace(0, np.nan)) * 100
-    metrics_summary["tackle_success_pct"] = (metrics_summary["tackleSuccessful"] / metrics_summary["tacklesTotal"].replace(0, np.nan)) * 100
-    metrics_summary["throwin_accuracy_pct"] = (metrics_summary["throwInsAccurate"] / metrics_summary["throwInsTotal"].replace(0, np.nan)) * 100
-    metrics_summary["save_pct"] = (metrics_summary["saves"] / metrics_summary["shots_on_target_faced"].replace(0, np.nan)) * 100
+    # -------- Derived KPIs / formatting --------
+    # Prefer base counts when available; otherwise use % fields from player_stats
+    def pct_from_counts(n, d):
+        return (metrics_summary[n] / metrics_summary[d].replace(0, np.nan) * 100)
 
-    # --- Step 6: Custom assignments ---
-    metrics_summary["key_passes"] = metrics_summary["passesKey"]
-    metrics_summary["goal_creating_actions"] = metrics_summary["goal_creating_actions"].fillna(0)
-    metrics_summary["shot_creating_actions"] = metrics_summary["shotsTotal"] + metrics_summary["passesKey"]
+    # Pass completion
+    if {"passesAccurate","passesTotal"}.issubset(metrics_summary.columns):
+        metrics_summary["pass_completion_pct"] = pct_from_counts("passesAccurate","passesTotal")
+    elif "passSuccess" in metrics_summary.columns:
+        metrics_summary["pass_completion_pct"] = pd.to_numeric(metrics_summary["passSuccess"], errors="coerce")
+    else:
+        metrics_summary["pass_completion_pct"] = 0.0
 
-    metrics_summary["claimsHigh"] = player_stats["claimsHigh"]
-    metrics_summary["collected"] = player_stats["collected"]
-    metrics_summary["totalSaves"] = player_stats["totalSaves"]
+    # Aerial duels
+    if {"aerialsWon","aerialsTotal"}.issubset(metrics_summary.columns):
+        metrics_summary["aerial_duel_pct"] = pct_from_counts("aerialsWon","aerialsTotal")
+    elif "aerialSuccess" in metrics_summary.columns:
+        metrics_summary["aerial_duel_pct"] = pd.to_numeric(metrics_summary["aerialSuccess"], errors="coerce")
+    else:
+        metrics_summary["aerial_duel_pct"] = 0.0
 
-    # --- Step 7: Final formatting ---
-    percent_cols = [
-        "pass_completion_pct", "aerial_duel_pct", "take_on_success_pct",
-        "shots_on_target_pct", "tackle_success_pct", "throwin_accuracy_pct",
-        "long_pass_pct", "save_pct"
-    ]
-    metrics_summary[percent_cols] = metrics_summary[percent_cols].round(1)
-    metrics_summary = metrics_summary.drop_duplicates(subset=["matchId"], keep="last").reset_index(drop=True)
+    # Take-ons
+    if {"dribblesWon","dribblesAttempted"}.issubset(metrics_summary.columns):
+        metrics_summary["take_on_success_pct"] = pct_from_counts("dribblesWon","dribblesAttempted")
+    elif "dribbleSuccess" in metrics_summary.columns:
+        metrics_summary["take_on_success_pct"] = pd.to_numeric(metrics_summary["dribbleSuccess"], errors="coerce")
+    else:
+        metrics_summary["take_on_success_pct"] = 0.0
+
+    # Tackles
+    if {"tackleSuccessful","tacklesTotal"}.issubset(metrics_summary.columns):
+        metrics_summary["tackle_success_pct"] = pct_from_counts("tackleSuccessful","tacklesTotal")
+    elif "tackleSuccess" in metrics_summary.columns:
+        metrics_summary["tackle_success_pct"] = pd.to_numeric(metrics_summary["tackleSuccess"], errors="coerce")
+    else:
+        metrics_summary["tackle_success_pct"] = 0.0
+
+    # Throw-ins
+    if {"throwInsAccurate","throwInsTotal"}.issubset(metrics_summary.columns):
+        metrics_summary["throwin_accuracy_pct"] = pct_from_counts("throwInsAccurate","throwInsTotal")
+    elif "throwInAccuracy" in metrics_summary.columns:
+        metrics_summary["throwin_accuracy_pct"] = pd.to_numeric(metrics_summary["throwInAccuracy"], errors="coerce")
+    else:
+        metrics_summary["throwin_accuracy_pct"] = 0.0
+
+    # Shots on target %
+    if {"shotsOnTarget","shotsTotal"}.issubset(metrics_summary.columns):
+        metrics_summary["shots_on_target_pct"] = pct_from_counts("shotsOnTarget","shotsTotal")
+    else:
+        metrics_summary["shots_on_target_pct"] = 0.0
+
+    # Save %
+    if {"saves","shots_on_target_faced"}.issubset(metrics_summary.columns):
+        metrics_summary["save_pct"] = (metrics_summary["saves"] / metrics_summary["shots_on_target_faced"].replace(0, np.nan)) * 100
+    else:
+        metrics_summary["save_pct"] = 0.0
+
+    # Aliases / passthroughs
+    metrics_summary["key_passes"] = metrics_summary["passesKey"] if "passesKey" in metrics_summary.columns else 0
+    if "goal_creating_actions" not in metrics_summary.columns:
+        metrics_summary["goal_creating_actions"] = 0
+    # Use counts for SCA if present
+    if "shot_creation_actions" in metrics_summary.columns and "shotsTotal" in metrics_summary.columns:
+        metrics_summary["shot_creating_actions"] = metrics_summary["shot_creation_actions"] + metrics_summary["shotsTotal"]
+    elif "shotsTotal" in metrics_summary.columns:
+        metrics_summary["shot_creating_actions"] = metrics_summary["shotsTotal"]
+    else:
+        metrics_summary["shot_creating_actions"] = 0
+
+    # Round percentages
+    for c in ["pass_completion_pct","aerial_duel_pct","take_on_success_pct",
+              "shots_on_target_pct","tackle_success_pct","throwin_accuracy_pct",
+              "long_pass_pct","save_pct"]:
+        if c in metrics_summary.columns:
+            metrics_summary[c] = pd.to_numeric(metrics_summary[c], errors="coerce").round(1).fillna(0)
+
+    # De-dupe by match (left-most kept)
+    if "matchId" in metrics_summary.columns:
+        metrics_summary = metrics_summary.drop_duplicates(subset=["matchId"], keep="last").reset_index(drop=True)
+    else:
+        metrics_summary = metrics_summary.reset_index(drop=True)
+
+    # Final diag
+    try:
+        st.caption(f"✅ metrics_summary: {metrics_summary.shape[0]} rows, {metrics_summary.shape[1]} cols")
+    except Exception:
+        pass
 
     return metrics_summary
 
-
-
-
-
 def prepare_player_data_with_minutes(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Cleans subbedIn/subbedOut columns, converts to float,
-    and calculates minutes played for each row.
+    Normalize player_data for downstream use and compute minutesPlayed.
+
+    Uses your schema:
+      - isFirstEleven (TINYINT 0/1)
+      - subbedInExpandedMinute, subbedOutExpandedMinute (SMALLINT, can be NULL)
+      - subbedInPeriod_value, subbedOutPeriod_value (TINYINT 1=1st half, 2=2nd, 3/4=ET; optional)
+
+    Minutes logic (simple, robust):
+      - Starter (isFirstEleven=1):
+          start = 0
+          end   = subbedOutExpandedMinute if not null else nominal_end (90 or 120 if ET)
+      - Sub (isFirstEleven=0):
+          if subbedInExpandedMinute is null → 0 minutes (unused sub)
+          else start = subbedInExpandedMinute; end = nominal_end
+      - minutesPlayed = max(0, end - start)
+
+    Note: Expanded-minute already accounts for stoppage in many feeds; if not, this is still consistent across matches.
     """
-    df['subbedInExpandedMinute'] = (
-        df['subbedInExpandedMinute']
-        .astype(str)
-        .str.replace(',', '.', regex=False)
-        .replace('None', pd.NA)
-    )
-    df['subbedOutExpandedMinute'] = (
-        df['subbedOutExpandedMinute']
-        .astype(str)
-        .str.replace(',', '.', regex=False)
-        .replace('None', pd.NA)
-    )
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=["playerId", "matchId", "teamId", "isFirstEleven", "minutesPlayed"])
 
-    df['subbedInExpandedMinute'] = pd.to_numeric(df['subbedInExpandedMinute'], errors='coerce')
-    df['subbedOutExpandedMinute'] = pd.to_numeric(df['subbedOutExpandedMinute'], errors='coerce')
+    out = df.copy()
 
-    def get_minutes(row):
-        if row['isFirstEleven'] == 1:
-            if pd.notna(row['subbedOutExpandedMinute']):
-                return row['subbedOutExpandedMinute']
-            else:
-                return 90.0
-        elif pd.notna(row['subbedInExpandedMinute']):
-            if pd.notna(row['subbedOutExpandedMinute']):
-                return row['subbedOutExpandedMinute'] - row['subbedInExpandedMinute']
-            else:
-                return 90.0 - row['subbedInExpandedMinute']
+    # ---- Coerce IDs to nullable Int64 (handles 12345, "12345", 12345.0, etc.)
+    for col in ["playerId", "matchId", "teamId"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+
+    # ---- isFirstEleven → 0/1 int
+    if "isFirstEleven" not in out.columns:
+        out["isFirstEleven"] = 0
+    out["isFirstEleven"] = (
+        out["isFirstEleven"]
+        .astype(str).str.strip().str.lower()
+        .replace({"true": "1", "yes": "1", "y": "1", "t": "1",
+                  "false": "0", "no": "0", "n": "0", "f": "0"})
+    )
+    out["isFirstEleven"] = pd.to_numeric(out["isFirstEleven"], errors="coerce").fillna(0).astype(int)
+
+    # ---- Bring in the substitution columns (ensure numeric / NaN)
+    for col in ["subbedInExpandedMinute", "subbedOutExpandedMinute"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
         else:
-            return 0.0
+            out[col] = np.nan
 
-    df['minutesPlayed'] = df.apply(get_minutes, axis=1)
-    return df
+    for col in ["subbedInPeriod_value", "subbedOutPeriod_value"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+        else:
+            out[col] = np.nan
 
-@st.cache_data(ttl=3600)
-def load_player_data(player_id, player_name):
+    # ---- Nominal match end based on periods observed
+    # Default 90; if we ever see periods > 2, assume 120 (extra time).
+    # This is per-row; if your dataset guarantees no ET in league games, it’ll stay 90.
+    def infer_nominal_end(row):
+        # Prefer explicit out period if available
+        periods = [row.get("subbedOutPeriod_value"), row.get("subbedInPeriod_value")]
+        if any((p is not np.nan and p and p >= 3) for p in periods):
+            return 120.0
+        return 90.0
+
+    nominal_end = out.apply(infer_nominal_end, axis=1)
+
+    # ---- Compute start/end
+    start = np.where(out["isFirstEleven"] == 1, 0.0, out["subbedInExpandedMinute"])
+    end   = np.where(out["isFirstEleven"] == 1,
+                     np.where(out["subbedOutExpandedMinute"].notna(),
+                              out["subbedOutExpandedMinute"],
+                              nominal_end),
+                     np.where(out["subbedInExpandedMinute"].notna(),
+                              nominal_end,
+                              0.0))  # unused sub → 0
+
+    # ---- minutesPlayed
+    out["minutesPlayed"] = pd.to_numeric(end, errors="coerce") - pd.to_numeric(start, errors="coerce")
+    out["minutesPlayed"] = out["minutesPlayed"].clip(lower=0).fillna(0.0)
+
+    # Ensure expected columns exist
+    for c in ["teamId"]:
+        if c not in out.columns:
+            out[c] = pd.Series(dtype="Int64")
+
+    return out
+
+
+def load_player_data(player_id: str, player_name: Optional[str] = None
+                     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float, int]:
+    """
+    Load all season data for a player.
+
+    Returns:
+        match_data         : DataFrame (rows from match_data for matches the player appeared in)
+        player_data        : DataFrame (rows from player_data for the player, with minutesPlayed computed)
+        team_data          : DataFrame (entire team_data table; untouched)
+        player_stats       : DataFrame (rows from player_stats for the player)
+        total_minutes      : float (sum of minutesPlayed across player_data rows)
+        games_as_starter   : int   (sum of isFirstEleven across player_data rows)
+
+    Notes:
+      - Prefers looking up player_stats by playerId; falls back to LOWER(playerName) if needed.
+      - Normalizes key id columns to pandas nullable Int64 to avoid dtype-join issues later.
+      - Uses prepare_player_data_with_minutes() to compute minutesPlayed from substitution info.
+    """
+    # 0) Connect
+    engine = connect_to_db()
+    if not engine:
+        raise Exception("Failed to connect to database")
+
+    # 1) Resolve the player exists in player_data by ID (canonical row)
+    player_info = pd.read_sql(
+        "SELECT * FROM player_data WHERE playerId = %s LIMIT 1",
+        con=engine,
+        params=(player_id,)
+    )
+    if player_info.empty:
+        raise Exception(f"No player found with ID: {player_id}. Name hint: {player_name}")
+
+    # Optional name from DB (for fallback later)
+    name_from_db = player_info.iloc[0].get("playerName")
+
+    # 2) Pull all player_data rows for this player
+    player_data = pd.read_sql(
+        "SELECT * FROM player_data WHERE playerId = %s",
+        con=engine,
+        params=(player_id,)
+    )
+
+    # Normalize ID columns early to avoid later mismatches
+    for col in ["playerId", "matchId", "teamId"]:
+        if col in player_data.columns:
+            player_data[col] = pd.to_numeric(player_data[col], errors="coerce").astype("Int64")
+
+    # 3) Player stats — prefer ID; fallback to LOWER(name) if ID not present / returns empty
     try:
-        engine = connect_to_db()
-        if not engine:
-            st.error("Failed to connect to database")
-            return None, None, None, None, None, None
+        player_stats = pd.read_sql(
+            "SELECT * FROM player_stats WHERE playerId = %s",
+            con=engine,
+            params=(player_id,)
+        )
+    except Exception:
+        player_stats = pd.DataFrame()
 
-        # Load filtered player_stats from view
-        try:
-            player_stats = pd.read_sql(
-                "SELECT * FROM player_stats WHERE playerId = %s",
-                con=engine,
-                params=(player_id,)
-            )
-        except Exception as e:
-            st.error(f"Error loading player stats: {str(e)}")
-            return None, None, None, None, None, None
+    if player_stats.empty and (player_name or name_from_db):
+        pname = player_name or name_from_db
+        # Use case-insensitive name equality; avoids partial contains mismatches
+        player_stats = pd.read_sql(
+            "SELECT * FROM player_stats WHERE LOWER(playerName) = LOWER(%s)",
+            con=engine,
+            params=(pname,)
+        )
 
-        # Load player_data (still from full table, unless you create a view for it)
-        try:
-            player_data = pd.read_sql(
-                "SELECT * FROM player_data WHERE playerId = %s",
-                con=engine,
-                params=(player_id,)
-            )
-        except Exception as e:
-            st.error(f"Error loading player data: {str(e)}")
-            return None, None, None, None, None, None
+    # Normalize ID columns in player_stats to align with other frames
+    if not player_stats.empty:
+        for col in ["playerId", "matchId", "teamId"]:
+            if col in player_stats.columns:
+                player_stats[col] = pd.to_numeric(player_stats[col], errors="coerce").astype("Int64")
 
-        # Prepare minutes played
-        try:
-            player_data = prepare_player_data_with_minutes(player_data)
-        except Exception as e:
-            st.error(f"Error preparing player data: {str(e)}")
-            return None, None, None, None, None, None
+        # Coerce numeric %/counts where needed (safe if already numeric)
+        # These exist in your schema; we’ll coerce broadly but safely.
+        numeric_cols = [
+            "ratings","aerialSuccess","dribbleSuccess","passSuccess","tackleSuccess","throwInAccuracy",
+            "possession","aerialsTotal","aerialsWon","claimsHigh","clearances","collected",
+            "cornersAccurate","cornersTotal","defensiveAerials","dispossessed","dribbledPast",
+            "dribblesAttempted","dribblesLost","dribblesWon","errors","foulsCommited","interceptions",
+            "offensiveAerials","offsidesCaught","parriedDanger","parriedSafe","passesAccurate","passesKey",
+            "passesTotal","shotsBlocked","shotsOffTarget","shotsOnPost","shotsOnTarget","shotsTotal",
+            "tackleSuccessful","tackleUnsuccesful","tacklesTotal","throwInsAccurate","throwInsTotal",
+            "totalSaves","touches"
+        ]
+        for c in numeric_cols:
+            if c in player_stats.columns:
+                # convert “87.00” (decimal) or strings cleanly
+                player_stats[c] = pd.to_numeric(player_stats[c], errors="coerce")
 
-        # Get list of match IDs from player_data
-        match_ids = player_data["matchId"].unique().tolist()
-        if not match_ids:
-            match_data = pd.DataFrame()
-        else:
-            placeholders = ','.join(['%s'] * len(match_ids))
-            query_matches = f"""
-                SELECT * FROM match_data
-                WHERE matchId IN ({placeholders})
-            """
-            try:
-                match_data = pd.read_sql(query_matches, con=engine, params=tuple(match_ids))
-            except Exception as e:
-                st.error(f"Error loading match data: {str(e)}")
-                return None, None, None, None, None, None
+    # 4) Compute minutesPlayed on player_data (uses your substitution fields)
+    #    Make sure this helper is defined ABOVE this function.
+    player_data = prepare_player_data_with_minutes(player_data)
 
-        # Load full team_data (could be optimized if needed)
-        try:
-            team_data = pd.read_sql("SELECT * FROM team_data", engine)
-        except Exception as e:
-            st.error(f"Error loading team data: {str(e)}")
-            return None, None, None, None, None, None
+    # 5) Match data for this player's matches
+    if "matchId" in player_data.columns:
+        match_ids = player_data["matchId"].dropna().unique().tolist()
+    else:
+        match_ids = []
 
-        # Aggregates
-        total_minutes = player_data['minutesPlayed'].sum()
-        games_as_starter = player_data['isFirstEleven'].fillna(0).sum()
+    if match_ids:
+        placeholders = ",".join(["%s"] * len(match_ids))
+        match_data = pd.read_sql(
+            f"SELECT * FROM match_data WHERE matchId IN ({placeholders})",
+            con=engine,
+            params=tuple(match_ids)
+        )
+        # Normalize matchId
+        if "matchId" in match_data.columns:
+            match_data["matchId"] = pd.to_numeric(match_data["matchId"], errors="coerce").astype("Int64")
+    else:
+        match_data = pd.DataFrame(columns=["matchId"])
 
-        return match_data, player_data, team_data, player_stats, total_minutes, games_as_starter
-    except Exception as e:
-        st.error(f"Unexpected error in load_player_data: {str(e)}")
-        return None, None, None, None, None, None
+    # 6) Team data (full table; you can filter later if needed)
+    team_data = pd.read_sql("SELECT * FROM team_data", con=engine)
+    # Note: team_data has snake_case columns (match_id, team_id, ...). We leave as-is to avoid breaking callers.
 
+    # 7) Aggregates
+    total_minutes = float(player_data.get("minutesPlayed", pd.Series(dtype=float)).fillna(0).sum())
+    games_as_starter = int(player_data.get("isFirstEleven", pd.Series(dtype=float)).fillna(0).sum())
+
+    return match_data, player_data, team_data, player_stats, total_minutes, games_as_starter
 
 @st.cache_data(ttl=300)
 def load_event_data_for_matches(player_id, match_ids, team_id=None):
