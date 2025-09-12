@@ -450,9 +450,6 @@ if not selected_kpis:
     st.error(f"⚠️ No KPIs found for position: {player_position}")
 
 
-# SIDE BAR
-st.sidebar.header("Time Filters")
-
 # ---------------------------
 # DATE JOIN + DELTAS + CARDS
 # ---------------------------
@@ -543,7 +540,6 @@ def add_match_dates(df, match_data_df):
     # Diagnostics (safe)
     try:
         null_rate = out["matchDate"].isna().mean()
-        st.caption(f"🔎 matchId join coverage: {(1 - null_rate):.0%} matched")
     except Exception:
         null_rate = 1.0
 
@@ -699,19 +695,13 @@ def display_metric_card(col, title, value, filtered_df, full_df, column, color=N
 # ---------------------------
 # WIRE DATES + SIDEBAR FILTER
 # ---------------------------
-
-# 0) Normalize 'matchId' to nullable Int64 on BOTH frames
 def to_int64_id(s):
-    # convert strings/floats like "12345" / 12345.0 → 12345 (Int64), keep NaN as <NA>
     return pd.to_numeric(s, errors="coerce").astype("Int64")
 
-# ensure column exists
 if "matchId" not in metrics_summary.columns:
-    st.error(f"'matchId' missing in metrics_summary. Columns: {list(metrics_summary.columns)}")
-    st.stop()
+    st.error(f"'matchId' missing in metrics_summary. Columns: {list(metrics_summary.columns)}"); st.stop()
 if "matchId" not in match_data.columns:
-    st.error(f"'matchId' missing in match_data. Columns: {list(match_data.columns)}")
-    st.stop()
+    st.error(f"'matchId' missing in match_data. Columns: {list(match_data.columns)}"); st.stop()
 
 metrics_summary = metrics_summary.copy()
 match_data = match_data.copy()
@@ -719,29 +709,30 @@ match_data = match_data.copy()
 metrics_summary["matchId"] = to_int64_id(metrics_summary["matchId"])
 match_data["matchId"]      = to_int64_id(match_data["matchId"])
 
-# 1) Parse date column once
 if "startDate" not in match_data.columns:
-    st.error("match_data is missing 'startDate'.")
-    st.stop()
+    st.error("match_data is missing 'startDate'."); st.stop()
 match_data["startDate"] = pd.to_datetime(match_data["startDate"], errors="coerce")
 
-# 2) De-dupe match_data (just in case) and attach matchDate via merge
-md_dates = (
-    match_data[["matchId", "startDate"]]
+# --- NEW: include 'season' while we dedupe match_data ---
+needed_cols = ["matchId", "startDate"]
+if "season" in match_data.columns:
+    needed_cols.append("season")
+else:
+    st.warning("⚠️ 'season' column not found in match_data; Season filter will be hidden.")
+
+md_meta = (
+    match_data[needed_cols]
     .dropna(subset=["matchId"])
     .sort_values("startDate")
     .drop_duplicates(subset=["matchId"], keep="last")
     .rename(columns={"startDate": "matchDate"})
 )
 
-metrics_summary = (
-    metrics_summary
-    .merge(md_dates, on="matchId", how="left")
-)
+# Merge date (and season if present)
+metrics_summary = metrics_summary.merge(md_meta, on="matchId", how="left")
 
-# 3) Validate we actually matched
+# Validate match coverage
 non_null_rate = metrics_summary["matchDate"].notna().mean() if "matchDate" in metrics_summary else 0.0
-st.caption(f"🔎 matchId→date match coverage: {non_null_rate:.0%}")
 
 if non_null_rate == 0:
     st.error("No match dates matched. Likely mismatch in matchId values between frames.")
@@ -749,28 +740,70 @@ if non_null_rate == 0:
     st.write("match_data sample:", match_data[["matchId", "startDate"]].head())
     st.stop()
 
-# 4) Sidebar range
-valid_dates = metrics_summary["matchDate"].dropna()
-min_date = valid_dates.min().date()
-max_date = valid_dates.max().date()
+# ------------------------------
+# Sidebar: Season (on top) + Time
+# ------------------------------
+st.sidebar.header("Season & Time Filters")
 
-st.sidebar.header("Time Filters")
-picked = st.sidebar.date_input(
-    "Select date range",
-    value=(min_date, max_date),
-    min_value=min_date,
-    max_value=max_date
-)
-start_date, end_date = picked if isinstance(picked, tuple) and len(picked) == 2 else (min_date, max_date)
+# 1) Season selector (only if season exists)
+if "season" in metrics_summary.columns:
+    # normalize to string for UI
+    seasons = (
+        metrics_summary["season"]
+        .dropna()
+        .astype(str)
+        .drop_duplicates()
+        .sort_values()
+        .tolist()
+    )
+    # Prefer most recent as default if you like; here we keep "All seasons".
+    season_options = ["All seasons"] + seasons
+    season_choice = st.sidebar.selectbox("Season", options=season_options, index=0)
+    if season_choice == "All seasons":
+        st.session_state.selected_season = None   # means no explicit season filter
+    else:
+        st.session_state.selected_season = season_choice
 
-# 5) Filter
-mask = (metrics_summary["matchDate"].dt.date >= start_date) & (metrics_summary["matchDate"].dt.date <= end_date)
-filtered_df = metrics_summary.loc[mask].copy()
-if filtered_df.empty:
-    st.warning("No matches in the selected date range. Showing season totals instead.")
-    filtered_df = metrics_summary.copy()
+    if season_choice == "All seasons":
+        season_filtered = metrics_summary
+    else:
+        season_filtered = metrics_summary[metrics_summary["season"].astype(str) == season_choice]
+        if season_filtered.empty:
+            st.warning("No matches for the selected season. Showing all seasons instead.")
+            season_filtered = metrics_summary
+else:
+    # Fallback: no season column
+    season_filtered = metrics_summary
 
+# 2) Time range (constrained by the season-filtered rows)
+valid_dates = season_filtered["matchDate"].dropna()
+if valid_dates.empty:
+    st.warning("No dated matches available to build a time filter. Showing all data.")
+    filtered_df = season_filtered.copy()
+else:
+    min_date = valid_dates.min().date()
+    max_date = valid_dates.max().date()
 
+    picked = st.sidebar.date_input(
+        "Select date range",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date
+    )
+    start_date, end_date = (
+        picked if isinstance(picked, tuple) and len(picked) == 2 else (min_date, max_date)
+    )
+
+    # 3) Apply date filter
+    mask = (
+        season_filtered["matchDate"].dt.date >= start_date
+    ) & (
+        season_filtered["matchDate"].dt.date <= end_date
+    )
+    filtered_df = season_filtered.loc[mask].copy()
+    if filtered_df.empty:
+        st.warning("No matches in the selected date range. Showing season selection only.")
+        filtered_df = season_filtered.copy()
 
 # -- Dynamically assigned KPIs
 metric_keys = selected_kpis
@@ -1170,110 +1203,131 @@ elif section == "Trends Stats":
         st.plotly_chart(fig, use_container_width=True)
 
 
+# -----------------------------
+# Player Comparison (season-aware)
+# -----------------------------
 elif section == "Player Comparison":
 
-    st.info(f"Top Players in the Competition – **{player_position}**")
+    # --- Season from sidebar (Option A) ---
+    selected_season = st.session_state.get("selected_season", None)
+    season_label = selected_season if selected_season else "All seasons"
 
-    # ---------------------------
-    # Step 0: normalize team_data schema (snake_case → camelCase)
-    # ---------------------------
-    team_data_cmp = team_data.copy()
-    team_data_cmp = team_data_cmp.rename(columns={
+    # Keep this consistent with what's actually stored in DB (already lower-cased in WHERE)
+    COMPETITION = "championship"
+
+    st.info(f"Top Players in the Competition – **{player_position}** (Season: {season_label})")
+
+    # ---------- Normalize team_data schema ----------
+    team_data_cmp = team_data.rename(columns={
         "match_id": "matchId",
         "team_id": "teamId",
-        "team_name": "teamName"
-    })
+        "team_name": "teamName",
+    }).copy()
 
-    # helpful dtype normalizer for ids
     def to_int64_id(s):
         return pd.to_numeric(s, errors="coerce").astype("Int64")
 
     if "matchId" not in team_data_cmp.columns or "teamId" not in team_data_cmp.columns:
-        st.error("team_data is missing matchId/teamId (after renaming). Check TEAM_DATA schema load.")
+        st.error("team_data missing matchId/teamId (even after renaming).")
         st.stop()
 
     team_data_cmp["matchId"] = to_int64_id(team_data_cmp["matchId"])
     team_data_cmp["teamId"]  = to_int64_id(team_data_cmp["teamId"])
 
-    # ---------------------------
-    # Step 1: load season matches
-    # ---------------------------
-    selected_season = "2024-2025"
+    # ---------- Load matches (season-aware) ----------
     engine = connect_to_db()
-    season_matches = pd.read_sql(
-        """
-        SELECT * FROM match_data
-        WHERE season = %s AND competition = 'eng-championship'
-        """,
-        con=engine,
-        params=(selected_season,)
-    )
 
-    # Make sure matchId is comparable with team_data_cmp
-    if "matchId" not in season_matches.columns:
-        st.error("match_data returned without matchId. Check match_data schema.")
-        st.stop()
-    season_matches["matchId"] = to_int64_id(season_matches["matchId"])
-
-    # ---------------------------
-    # Step 2: score parsing (robust + non-blocking)
-    # ---------------------------
-    season_matches["score_clean"] = (
-        season_matches["score"].astype(str).str.strip().str.replace(" ", "", regex=False)
-    )
-    valid_scores = season_matches["score_clean"].str.contains(r"^\d+:\d+$", na=False)
-    clean_scores = season_matches.loc[valid_scores, "score_clean"]
-
-    if clean_scores.empty:
-        st.warning("No valid scores in season_matches — points table may be empty.")
-        season_matches["home_goals"] = pd.NA
-        season_matches["away_goals"] = pd.NA
+    if selected_season:
+        season_matches = pd.read_sql(
+            """
+            SELECT matchId, startDate, score, ftScore, season, competition
+            FROM match_data
+            WHERE season = %s AND LOWER(competition) = %s
+            """,
+            con=engine, params=(selected_season, COMPETITION)
+        )
+        if season_matches.empty:
+            st.error(f"No matches found for season '{selected_season}' in competition '{COMPETITION}'.")
+            st.stop()
     else:
-        score_split = clean_scores.str.split(":", expand=True)
-        if score_split.shape[1] < 2:
-            st.error("❌ Score splitting failed — format not consistent with '1:0'")
-            season_matches["home_goals"] = pd.NA
-            season_matches["away_goals"] = pd.NA
-        else:
-            season_matches.loc[clean_scores.index, "home_goals"] = pd.to_numeric(score_split.iloc[:, 0], errors="coerce")
-            season_matches.loc[clean_scores.index, "away_goals"] = pd.to_numeric(score_split.iloc[:, 1], errors="coerce")
+        # All seasons: load by competition only; date range still applied later
+        season_matches = pd.read_sql(
+            """
+            SELECT matchId, startDate, score, ftScore, season, competition
+            FROM match_data
+            WHERE LOWER(competition) = %s
+            """,
+            con=engine, params=(COMPETITION,)
+        )
+        if season_matches.empty:
+            st.error(f"No matches found in competition '{COMPETITION}'.")
+            st.stop()
 
-    # ---------------------------
-    # Step 3: filter team_data by matchIds (now using normalized columns)
-    # ---------------------------
+    if "matchId" not in season_matches.columns:
+        st.error("match_data has no matchId column.")
+        st.stop()
+
+    season_matches["matchId"]   = to_int64_id(season_matches["matchId"])
+    season_matches["startDate"] = pd.to_datetime(season_matches["startDate"], errors="coerce")
+
+    # ---------- Extract goals (prefer ftScore, then score) ----------
+    def attach_goals(df):
+        df = df.copy()
+        df["home_goals"] = pd.NA
+        df["away_goals"] = pd.NA
+
+        def try_parse(col):
+            if col not in df.columns:
+                return False
+            s = df[col].astype(str).str.strip().str.replace(" ", "", regex=False)
+            ok = s.str.contains(r"^\d+:\d+$", na=False)
+            if not ok.any():
+                return False
+            split = s.where(ok).str.split(":", expand=True)
+            if split.shape[1] < 2:
+                return False
+            df.loc[ok, "home_goals"] = pd.to_numeric(split[0], errors="coerce")
+            df.loc[ok, "away_goals"] = pd.to_numeric(split[1], errors="coerce")
+            return True
+
+        parsed = try_parse("ftScore")
+        if not parsed:
+            parsed = try_parse("score")
+
+        if not parsed:
+            st.warning("No valid scores parsed from ftScore/score — points may be partial/zero.")
+        return df
+
+    season_matches = attach_goals(season_matches)
+
+    # ---------- Filter team_data by the (season’s) matchIds ----------
     filtered_match_ids = season_matches["matchId"].dropna().unique().tolist()
     if not filtered_match_ids:
-        st.warning("No season match IDs found for the selected season.")
+        st.error("No season match IDs available after normalization.")
         st.stop()
 
     team_data_filtered = team_data_cmp[team_data_cmp["matchId"].isin(filtered_match_ids)].copy()
     if team_data_filtered.empty:
-        st.warning("team_data has no rows for these matches.")
+        st.error("team_data has no rows for these matches.")
         st.stop()
 
-    # ---------------------------
-    # Step 4: merge scores into team_data
-    # ---------------------------
+    # Merge scores into team_data
     team_scores_df = pd.merge(
         team_data_filtered,
-        season_matches[["matchId", "home_goals", "away_goals", "score"]],
+        season_matches[["matchId", "home_goals", "away_goals", "score", "ftScore"]],
         on="matchId",
         how="inner"
     )
 
-    # ---------------------------
-    # Step 5: infer home/away by order within matchId
-    # ---------------------------
+    # Infer home/away by row order within matchId (assumes exactly 2 rows per match)
     team_scores_df["team_order"] = team_scores_df.groupby("matchId").cumcount()
     team_scores_df["home_away"] = team_scores_df["team_order"].map({0: "home", 1: "away"})
 
-    # ---------------------------
-    # Step 6: assign points
-    # ---------------------------
+    # Points (skip rows with missing goals)
     def assign_points(row):
         hg, ag = row["home_goals"], row["away_goals"]
         if pd.isna(hg) or pd.isna(ag):
-            return 0  # or pd.NA if you prefer
+            return 0
         if row["home_away"] == "home":
             return 3 if hg > ag else 1 if hg == ag else 0
         else:
@@ -1281,24 +1335,23 @@ elif section == "Player Comparison":
 
     team_scores_df["points"] = team_scores_df.apply(assign_points, axis=1)
 
-    # ---------------------------
-    # Step 7: aggregate total points per team
-    # ---------------------------
     team_points = (
         team_scores_df
         .groupby(["teamId", "teamName"], as_index=False)["points"]
         .sum()
-        .sort_values(by="points", ascending=False)
+        .sort_values("points", ascending=False)
     )
 
-    # ---------------------------
-    # Step 8: select top 5 teams
-    # ---------------------------
-    top_5_teams = team_points.head(5)
-    top_team_ids = top_5_teams["teamId"].tolist()
+    if team_points.empty:
+        st.error("Could not compute team points for the selected filters.")
+        st.stop()
+
+    # Top-5 defaults (season-scoped if season set)
+    top_5_teams      = team_points.head(5)
+    top_team_ids     = top_5_teams["teamId"].tolist()
     top_5_team_names = top_5_teams["teamName"].tolist()
 
-    # Step 3: Get Real Position of Logged-in Player
+    # ---------- Real Position codes ----------
     reverse_position_map = {
         "Goalkeeper": ["GK"],
         "Center Back": ["DC"],
@@ -1319,19 +1372,16 @@ elif section == "Player Comparison":
 
     st.write(f"Position codes resolved for **{player_position}** → {position_codes}")
 
-        # Step 4: Team Filter UI (ordered by points, top 5 pre-selected)
+    # ---------- Team Filter UI (ordered by points, top 5 pre-selected) ----------
     with st.expander("Filter by Teams", expanded=False):
-        all_team_names = team_points["teamName"].tolist()  # already sorted by points descending
+        all_team_names = team_points["teamName"].tolist()  # already points-ordered
 
-        # Search box
         search_team = st.text_input("🔍 Search team:", "", key="search_team")
         filtered_team_options = [t for t in all_team_names if search_team.lower() in t.lower()]
 
-        # Set default selection only once
         if "selected_team_names" not in st.session_state:
-            st.session_state.selected_team_names = top_5_team_names
+            st.session_state.selected_team_names = top_5_team_names or all_team_names[:5]
 
-        # Quick-select buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Select All Teams"):
@@ -1340,7 +1390,6 @@ elif section == "Player Comparison":
             if st.button("Clear Teams"):
                 st.session_state.selected_team_names = []
 
-        # Show checkboxes
         selected_team_names = st.session_state.get("selected_team_names", top_5_team_names)
         new_selection = []
 
@@ -1349,231 +1398,302 @@ elif section == "Player Comparison":
             checked = team in selected_team_names
             if st.checkbox(team, value=checked, key=f"team_{team}_{i}"):
                 new_selection.append(team)
-
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Update session state
         st.session_state.selected_team_names = new_selection
 
-        # Clean and match team names
+        # Match back to IDs
         team_points["teamName_clean"] = team_points["teamName"].str.strip().str.lower()
         selected_team_names_clean = [name.strip().lower() for name in new_selection]
         selected_team_ids = team_points[team_points["teamName_clean"].isin(selected_team_names_clean)]["teamId"].tolist()
 
-    # Step 5: Player Filter UI (same position + selected teams)
+    # ---------- Player Filter (season + position + selected teams) ----------
     if not selected_team_ids:
         st.warning("No teams selected.")
-    else:
-        selected_team_ids_str = ",".join(str(tid) for tid in selected_team_ids)
+        st.stop()
 
-        query = f"""
-            SELECT 
-                ps.playerId,
-                ps.playerName,
-                pd.age,
-                pd.shirtNo,
-                pd.height,
-                pd.weight,
-                ps.teamId,
-                td.teamName,
-                pd.isFirstEleven,
+    selected_team_ids_str = ",".join(str(int(tid)) for tid in selected_team_ids if pd.notna(tid))
 
-                ps.matchId,
-                md.startDate
-            FROM player_stats ps
-            JOIN player_data pd 
-                ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
-            JOIN match_data md 
-                ON ps.matchId = md.matchId
-            JOIN team_data td 
-                ON ps.teamId = td.teamId AND ps.matchId = td.matchId
-            WHERE pd.position IN ({','.join([f"'{pos}'" for pos in position_codes])})
-            AND ps.teamId IN ({selected_team_ids_str})
-            AND md.startDate BETWEEN %s AND %s
-        """
-        players_full = pd.read_sql(query, connect_to_db(), params=(start_date, end_date))
+    # Build season-aware players query
+  # --- Query players in scope (season + competition + position + teams + date window)
+    base_query = f"""
+        SELECT 
+            ps.playerId,
+            ps.playerName,
+            pd.age,
+            pd.shirtNo,
+            pd.height,
+            pd.weight,
+            ps.teamId,
+            pd.isFirstEleven,
+            ps.matchId,
+            md.startDate
+        FROM player_stats ps
+        JOIN player_data pd 
+            ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
+        JOIN match_data md 
+            ON ps.matchId = md.matchId
+        WHERE pd.position IN ({','.join([f"'{pos}'" for pos in position_codes])})
+        AND ps.teamId IN ({selected_team_ids_str})
+        AND LOWER(md.competition) = %s
+    """
+    params = [COMPETITION]
 
-        # 🛠️ Add minutesPlayed manually from your prepared player_data
-        minutes_df = player_data[["playerId", "matchId", "minutesPlayed"]].copy()
+    if selected_season:
+        base_query += " AND md.season = %s"
+        params.append(selected_season)
 
-        # --- Fix dtypes just in case ---
-        players_full["playerId"] = players_full["playerId"].astype(str)
-        players_full["matchId"] = players_full["matchId"].astype(str)
-        minutes_df["playerId"] = minutes_df["playerId"].astype(str)
-        minutes_df["matchId"] = minutes_df["matchId"].astype(str)
+    # still honor the sidebar date window (already constrained by season if set)
+    base_query += " AND md.startDate BETWEEN %s AND %s"
+    params.extend([start_date, end_date])
 
-        # 🔁 Merge minutesPlayed into the player stats
-        players_full = pd.merge(players_full, minutes_df, on=["playerId", "matchId"], how="left")
+    players_full = pd.read_sql(base_query, connect_to_db(), params=tuple(params))
 
-        # Build player selector BEFORE filtering
-        all_player_names = players_full[["playerId", "playerName"]].drop_duplicates().sort_values("playerName")
-        player_options = all_player_names["playerName"].tolist()
-        top_players = (
-            players_full.groupby("playerName")["minutesPlayed"]
-            .sum()
-            .sort_values(ascending=False)
-            .head(5)
-            .index.tolist()
+    # --- Minutes from your prepared player_data (already in memory)
+    minutes_df = player_data.loc[:, ["playerId", "matchId", "minutesPlayed"]].copy()
+
+    # Normalize IDs and de-dupe to 1 row per (playerId, matchId)
+    minutes_df["playerId"] = minutes_df["playerId"].astype(str)
+    minutes_df["matchId"]  = minutes_df["matchId"].astype(str)
+    minutes_df = (
+        minutes_df
+        .groupby(["playerId", "matchId"], as_index=False)["minutesPlayed"]
+        .max()  # max minutes per match is typical
+    )
+
+    # Coerce minutes to numeric
+    minutes_df["minutesPlayed"] = pd.to_numeric(
+        minutes_df["minutesPlayed"].astype(str).str.replace(",", ".", regex=False),
+        errors="coerce"
+    ).fillna(0)
+
+    # Align players_full IDs and merge minutes
+    players_full["playerId"] = players_full["playerId"].astype(str)
+    players_full["matchId"]  = players_full["matchId"].astype(str)
+    players_full = players_full.merge(
+        minutes_df,
+        on=["playerId", "matchId"],
+        how="left",
+        validate="m:1"
+    )
+    players_full["minutesPlayed"] = pd.to_numeric(players_full["minutesPlayed"], errors="coerce").fillna(0)
+
+    if players_full.empty:
+        st.warning("No players found for the selected filters.")
+        st.stop()
+
+    # --- Ensure teamName is on players_full for UI labels
+    td_names = team_data_filtered[["teamId", "teamName"]].drop_duplicates().copy()
+    td_names["teamId"] = td_names["teamId"].astype(str)
+    players_full["teamId"] = players_full["teamId"].astype(str)
+    players_full = players_full.merge(td_names, on="teamId", how="left")
+
+    # --- Build player selector BEFORE date filtering (ID-based, stable)
+    player_index = (
+        players_full.groupby("playerId", as_index=False)
+        .agg(
+            playerName=("playerName", "first"),
+            teamName=("teamName", "first"),
+            minutes=("minutesPlayed", "sum")
+        )
+        .sort_values("minutes", ascending=False)
+    )
+
+    options_ids = player_index["playerId"].astype(str).tolist()
+
+    # Default: top by minutes, ensure logged-in player included
+    logged_player_id = str(player_id)
+    logged_player_name = player_name
+    default_ids = player_index.head(5)["playerId"].astype(str).tolist()
+    if logged_player_id not in default_ids:
+        default_ids = ([logged_player_id] + [pid for pid in default_ids if pid != logged_player_id])[:5]
+
+    # Pretty labels
+    label_map = {
+        str(row.playerId): (
+            f"{row.playerName} ({row.teamName})" if pd.notna(row.teamName) and row.teamName != "" else f"{row.playerName}"
+        )
+        for _, row in player_index.iterrows()
+    }
+
+    with st.expander("Filter Players by Position", expanded=False):
+        selected_player_ids = st.multiselect(
+            "Select players to compare",
+            options=options_ids,
+            default=default_ids,
+            format_func=lambda pid: label_map.get(str(pid), str(pid))
         )
 
-        with st.expander("Filter Players by Position", expanded=False):
-            selected_players = st.multiselect("Select players to compare", player_options, default=top_players)
+    # Now filter selected players (ID-based)
+    filtered_players = players_full[players_full["playerId"].astype(str).isin([str(x) for x in selected_player_ids])].copy()
 
-        # Now filter selected players
-        selected_player_ids = all_player_names[all_player_names["playerName"].isin(selected_players)]["playerId"].tolist()
-        filtered_players = players_full[players_full["playerId"].isin(selected_player_ids)].copy()
+    # Date filter (season + sidebar date window)
+    filtered_players["startDate"] = pd.to_datetime(filtered_players["startDate"], errors="coerce")
+    filtered_players = filtered_players[
+        (filtered_players["startDate"] >= pd.to_datetime(start_date)) &
+        (filtered_players["startDate"] <= pd.to_datetime(end_date))
+    ].copy()
 
-        # Now apply date filtering safely
-        # Ensure startDate is in datetime format
-        filtered_players["startDate"] = pd.to_datetime(filtered_players["startDate"], errors="coerce")
+    if filtered_players.empty:
+        st.warning("No player/match rows left after date filtering.")
+        st.stop()
 
-        # Now safely apply date filter
-        filtered_players = filtered_players[
-            (filtered_players["startDate"] >= pd.to_datetime(start_date)) &
-            (filtered_players["startDate"] <= pd.to_datetime(end_date))
-].copy()
-
-        # Group and aggregate player summary
-        summary_comparison_df = (
-            filtered_players.groupby(["playerId", "playerName", "teamId"], as_index=False)
-                .agg(
-                    age=("age", "first"),
-                    shirtNo=("shirtNo", "first"),
-                    height=("height", "first"),
-                    weight=("weight", "first"),
-                    matches_played=("matchId", "nunique"),
-                    games_as_starter=("isFirstEleven", "sum"),
-                    total_minutes=("minutesPlayed", "sum"),
-                )
+    # --- Group and aggregate player summary
+    summary_comparison_df = (
+        filtered_players.groupby(["playerId", "playerName", "teamId"], as_index=False)
+            .agg(
+                age=("age", "first"),
+                shirtNo=("shirtNo", "first"),
+                height=("height", "first"),
+                weight=("weight", "first"),
+                matches_played=("matchId", "nunique"),
+                games_as_starter=("isFirstEleven", "sum"),
+                total_minutes=("minutesPlayed", "sum"),
             )
+    )
 
-        # Convert teamId to str before merging
-        summary_comparison_df["teamId"] = summary_comparison_df["teamId"].astype(str)
-        team_data_filtered["teamId"] = team_data_filtered["teamId"].astype(str)
+    # Resolve teamName for the summary table
+    summary_comparison_df["teamId"] = summary_comparison_df["teamId"].astype(str)
+    summary_comparison_df = summary_comparison_df.merge(
+        td_names, on="teamId", how="left"
+    )
 
-        # Merge to get team name
-        summary_comparison_df = pd.merge(summary_comparison_df, team_data_filtered[["teamId", "teamName"]].drop_duplicates(), on="teamId", how="left")
+    # --- Display table
+    summary_display = summary_comparison_df.rename(columns={
+        "playerName": "Player",
+        "teamName": "Team",
+        "age": "Age",
+        "shirtNo": "Shirt No",
+        "height": "Height",
+        "weight": "Weight",
+        "matches_played": "Games Played",
+        "games_as_starter": "Games as Starter",
+        "total_minutes": "Minutes Played"
+    }).sort_values(by="Games Played", ascending=False)
 
-        # Rename for display
-        summary_display = summary_comparison_df.rename(columns={
-            "playerName": "Player",
-            "teamName": "Team",
-            "age": "Age",
-            "shirtNo": "Shirt No",
-            "height": "Height",
-                "weight": "Weight",
-                "matches_played": "Games Played",
-                "games_as_starter": "Games as Starter",
-                "total_minutes": "Minutes Played"
-            })
+    st.dataframe(
+        summary_display[["Player","Team","Age","Shirt No","Height","Weight","Games Played","Games as Starter","Minutes Played"]],
+        use_container_width=True
+    )
 
-        # Order and show
-        columns_to_display = [
-            "Player", "Team", "Age", "Shirt No", "Height", "Weight",
-            "Games Played", "Games as Starter", "Minutes Played"
-        ]
-        summary_display = summary_display.sort_values(by="Games Played", ascending=False)
-        st.dataframe(summary_display[columns_to_display], use_container_width=True)
+    # --- Ensure logged-in player's matches are present for KPI calc
+    logged_matches_full = players_full[players_full["playerId"].astype(str) == logged_player_id]
+    filtered_players = pd.concat([filtered_players, logged_matches_full]).drop_duplicates(
+        subset=["playerId", "matchId"]
+    ).reset_index(drop=True)
 
-        # --- STEP 6: KPI Calculation for Selected Players ---
+    # Prepare IDs/placeholders for stats/events queries
+    player_ids = filtered_players["playerId"].astype(str).unique().tolist()
+    match_ids  = filtered_players["matchId"].astype(str).unique().tolist()
 
-        # Ensure filtered_players has string playerId and matchId for safe joins
-        filtered_players["playerId"] = filtered_players["playerId"].astype(str)
-        filtered_players["matchId"] = filtered_players["matchId"].astype(str)
+    if not player_ids or not match_ids:
+        st.warning("No player/match data to compute KPIs for the selected season and filters.")
+        st.stop()
 
-        # Ensure logged-in player is included with full metadata
-        logged_player_id = str(player_id)
-        logged_player_name = player_name
+    player_placeholders = ",".join(["%s"] * len(player_ids))
+    match_placeholders  = ",".join(["%s"] * len(match_ids))
+    
 
-        # Get all matches for the logged-in player
-        logged_matches_full = players_full[players_full["playerId"] == logged_player_id]
-        
-        # Add logged-in player's data to filtered players
-        filtered_players = pd.concat([filtered_players, logged_matches_full]).drop_duplicates(
-            subset=["playerId", "matchId"]
-        ).reset_index(drop=True)
-
-        # Ensure logged-in player's matches are included in match_ids
-        match_ids = filtered_players["matchId"].unique().tolist()
-
-        # Proceed to load player stats and events
-        player_ids = filtered_players["playerId"].unique().tolist()
-        match_ids = filtered_players["matchId"].unique().tolist()
-
-        # --- Load player_stats and event_data for selected players ---
-        player_placeholders = ','.join(['%s'] * len(player_ids))
-        match_placeholders = ','.join(['%s'] * len(match_ids))
-
-        query_stats = f"""
+    # --- fetch stats & events
+    query_stats = f"""
         SELECT * FROM player_stats
         WHERE playerId IN ({player_placeholders})
-        AND matchId IN ({match_placeholders})
+        AND matchId  IN ({match_placeholders})
     """
-    stats_df = pd.read_sql(query_stats, con=connect_to_db(), params=tuple(player_ids + match_ids))
+    stats_df = pd.read_sql(query_stats, con=engine, params=tuple(player_ids + match_ids))
 
     query_events = f"""
         SELECT * FROM event_data
         WHERE playerId IN ({player_placeholders})
-        AND matchId IN ({match_placeholders})
+        AND matchId  IN ({match_placeholders})
     """
-    events_df = pd.read_sql(query_events, con=connect_to_db(), params=tuple(player_ids + match_ids))
+    events_df = pd.read_sql(query_events, con=engine, params=tuple(player_ids + match_ids))
 
-    # --- Convert IDs to string for safe joins ---
-    stats_df["playerId"] = stats_df["playerId"].astype(str)
-    stats_df["matchId"] = stats_df["matchId"].astype(str)
-    events_df["playerId"] = events_df["playerId"].astype(str)
-    events_df["matchId"] = events_df["matchId"].astype(str)
+    # Normalize IDs
+    for df_ in (stats_df, events_df):
+        df_["playerId"] = df_["playerId"].astype(str)
+        df_["matchId"]  = df_["matchId"].astype(str)
 
-    # Combine logged player's stats with other players' metrics
-
-    # --- STEP 6: KPI Calculation for Selected Players (logged-in + comparison) ---
-
-    # Prepare logged-in player metrics from Section 1
+    # Logged-in player's metrics (already built earlier in your app)
     logged_player_metrics = metrics_summary[
-    (metrics_summary["matchDate"] >= pd.to_datetime(start_date)) &
-    (metrics_summary["matchDate"] <= pd.to_datetime(end_date))
+        (metrics_summary["matchDate"] >= pd.to_datetime(start_date)) &
+        (metrics_summary["matchDate"] <= pd.to_datetime(end_date))
     ].copy()
-    logged_player_metrics["playerId"] = str(player_id)
+    logged_player_id = str(player_id)
+    logged_player_metrics["playerId"] = logged_player_id
+    logged_player_metrics["playerId"] = logged_player_metrics["playerId"].astype(str)
 
-    # Filter stats/events for comparison players
-    comparison_stats = stats_df[stats_df["playerId"] != str(player_id)].copy()
-    comparison_events = events_df[events_df["playerId"] != str(player_id)].copy()
+    # Comparison players (exclude logged-in)
+    comparison_stats  = stats_df[stats_df["playerId"] != logged_player_id].copy()
+    comparison_events = events_df[events_df["playerId"] != logged_player_id].copy()
 
-    # Compute match-level metrics for comparison players
     comparison_metrics = process_player_comparison_metrics(
         comparison_stats, comparison_events, player_position
     )
 
-    # Combine both
+    # ---- Combine + enrich labels
     all_metrics_df = pd.concat([logged_player_metrics, comparison_metrics], ignore_index=True)
+    all_metrics_df["playerId"] = all_metrics_df["playerId"].astype(str)
 
-    # Add playerName and teamName from summary_comparison_df
-    player_info_map = summary_comparison_df.set_index("playerId")[["playerName", "teamName"]].to_dict(orient="index")
-    if logged_player_id not in player_info_map:
-        logged_team_name = player_data[player_data["playerId"] == logged_player_id]["teamName"].values[0]
-        player_info_map[logged_player_id] = {
-            "playerName": logged_player_name,
-            "teamName": logged_team_name
-        }
-    all_metrics_df["playerName"] = all_metrics_df["playerId"].map(lambda x: player_info_map.get(x, {}).get("playerName", ""))
-    all_metrics_df["teamName"] = all_metrics_df["playerId"].map(lambda x: player_info_map.get(x, {}).get("teamName", ""))
+    # Build a name/team lookup (prefer summary_comparison_df; else fallback)
+    if {"playerId","playerName","teamName"}.issubset(summary_comparison_df.columns):
+        name_lookup = (
+            summary_comparison_df[["playerId","playerName","teamName"]]
+            .drop_duplicates(subset=["playerId"])
+            .copy()
+        )
+    else:
+        name_lookup = (
+            players_full[["playerId","playerName","teamId"]]
+            .drop_duplicates(subset=["playerId"])
+            .merge(
+                team_data_filtered[["teamId","teamName"]].drop_duplicates(),
+                on="teamId", how="left"
+            )[["playerId","playerName","teamName"]]
+            .copy()
+        )
+    name_lookup["playerId"] = name_lookup["playerId"].astype(str)
 
-    # --- Group by player and aggregate metrics ---
+    # Drop any existing name/team cols to avoid suffixes, then merge
+    for col in ("playerName","teamName"):
+        if col in all_metrics_df.columns:
+            all_metrics_df.drop(columns=[col], inplace=True)
+
+    all_metrics_df = all_metrics_df.merge(name_lookup, on="playerId", how="left")
+
+    # ---- Ensure the logged-in player is present
+    mask_logged = all_metrics_df["playerId"] == logged_player_id
+    if not mask_logged.any():
+        # Add a zero row so the logged-in player appears in comparisons
+        zero_row = {c: 0 for c in all_metrics_df.columns if c not in ("playerId","playerName","teamName")}
+        zero_row.update({"playerId": logged_player_id, "playerName": logged_player_name})
+        all_metrics_df = pd.concat([all_metrics_df, pd.DataFrame([zero_row])], ignore_index=True)
+        mask_logged = all_metrics_df["playerId"] == logged_player_id
+
+    # Fill missing name/team for logged player
+    all_metrics_df.loc[mask_logged, "playerName"] = all_metrics_df.loc[mask_logged, "playerName"].fillna(logged_player_name)
+    if all_metrics_df.loc[mask_logged, "teamName"].isna().any():
+        try:
+            logged_team_name = (
+                player_data[player_data["playerId"].astype(str) == logged_player_id]["teamName"].iloc[0]
+                if "teamName" in player_data.columns and not player_data.empty else ""
+            )
+        except Exception:
+            logged_team_name = ""
+        all_metrics_df.loc[mask_logged, "teamName"] = all_metrics_df.loc[mask_logged, "teamName"].fillna(logged_team_name)
+
+    # ---- Aggregate KPIs per player
     grouped = all_metrics_df.groupby("playerId")
+    summary_metrics_df = grouped[["playerName","teamName"]].first().reset_index()
 
-    # Initialize summary DataFrame
-    summary_metrics_df = grouped[["playerName", "teamName"]].first().reset_index()
-
-    # Loop through position-based KPIs and aggregate
     for kpi in position_kpi_map.get(player_position, []):
         metric_type = metric_type_map.get(kpi, "aggregate")
-
         if metric_type == "percentage":
             numerator, denominator = percentage_formula_map.get(kpi, (None, None))
             if numerator in all_metrics_df.columns and denominator in all_metrics_df.columns:
                 sum_num = grouped[numerator].sum()
-                sum_den = grouped[denominator].sum()
-                weighted_avg = (sum_num / sum_den.replace(0, np.nan)) * 100
+                sum_den = grouped[denominator].sum().replace(0, np.nan)
+                weighted_avg = (sum_num / sum_den) * 100
                 summary_metrics_df[kpi] = summary_metrics_df["playerId"].map(weighted_avg.round(1))
             else:
                 summary_metrics_df[kpi] = np.nan
@@ -1584,7 +1704,7 @@ elif section == "Player Comparison":
             else:
                 summary_metrics_df[kpi] = np.nan
 
-    # Add tooltip support
+    # Tooltips
     all_tooltip_fields = set()
     for fields in metric_tooltip_fields.values():
         all_tooltip_fields.update(fields)
@@ -1595,18 +1715,16 @@ elif section == "Player Comparison":
         else:
             summary_metrics_df[tooltip_col] = np.nan
 
-    # Final cleanup
     summary_metrics_df = summary_metrics_df.fillna(0)
 
-    # --- Plot KPI Comparison Charts ---
+    # --- Charts ---
     st.info("Comparison by KPI")
 
     for kpi in position_kpi_map.get(player_position, []):
         if kpi not in summary_metrics_df.columns:
             continue
 
-        chart_data = summary_metrics_df[["playerName", kpi]].copy()
-        chart_data = chart_data.sort_values(by=kpi, ascending=False)
+        chart_data = summary_metrics_df[["playerName", kpi]].copy().sort_values(by=kpi, ascending=False)
         chart_data["color"] = chart_data["playerName"].apply(
             lambda name: "#FFD700" if name == player_name else "#d3d3d3"
         )
@@ -1628,7 +1746,6 @@ elif section == "Player Comparison":
             height=300
         )
 
-        # Add season average line
         season_avg = chart_data[kpi].mean()
         fig.add_hline(
             y=season_avg,
@@ -1638,16 +1755,10 @@ elif section == "Player Comparison":
             annotation_position="top right"
         )
 
-        # Clamp percentage metrics to 100%
         if metric_type_map.get(kpi) == "percentage":
             fig.update_yaxes(range=[0, 100])
 
-        fig.update_layout(
-            xaxis_title="Player",
-            yaxis_title=metric_labels.get(kpi, kpi),
-            showlegend=False
-        )
-
+        fig.update_layout(xaxis_title="Player", yaxis_title=metric_labels.get(kpi, kpi), showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
     st.expander("### Players Stats KPI Comparison")
