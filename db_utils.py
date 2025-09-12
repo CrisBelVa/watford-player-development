@@ -153,7 +153,6 @@ def connect_to_db():
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
                 
-            st.success("✅ Successfully connected to the database")
             return engine
             
         except Exception as e:
@@ -188,69 +187,102 @@ def clean_numeric_columns(df):
                 continue
     return df
 
-def get_player_position(player_data_df, event_data_df, player_id, player_name):
+def get_player_position(player_data_df, event_data_df, player_id, player_name=None):
     """
-    Returns the dominant position for a player. If 'Sub', finds the most frequent real position
-    using event_data. Uses safe dtype normalization to avoid empty selections.
+    If player_data position is not 'Sub' -> return mapped label.
+    If 'Sub' (or missing) -> infer by the most frequent non-Sub position across the player's rows
+    (prefer event_data; fallback to player_data). Ties broken by recency if matchDate exists.
+    Final fallback: return the raw DB value from player_data (even if 'Sub'); else 'Unknown'.
     """
 
+    import pandas as pd
+    from collections import Counter
+
+    # Canonical map -> label you use elsewhere in the app
     position_map = {
         "GK": "Goalkeeper",
-        "DC": "Center Back",
-        "DMC": "Defensive Midfielder",
-        "DL": "Left Back",
-        "DML": "Left Back",
-        "DR": "Right Back",
-        "DMR": "Right Back",
-        "MC": "Midfielder",
-        "ML": "Midfielder",
-        "MR": "Midfielder",
-        "AMC": "Attacking Midfielder",
-        "AML": "Left Winger",
-        "FWL": "Left Winger",
-        "AMR": "Right Winger",
-        "FWR": "Right Winger",
-        "FW": "Striker",
+        "DC": "Center Back", "CB": "Center Back",
+        "DL": "Left Back", "LB": "Left Back", "DML": "Left Back", "LWB": "Left Back",
+        "DR": "Right Back","RB": "Right Back","DMR": "Right Back","RWB": "Right Back",
+        "DMC": "Defensive Midfielder", "DM": "Defensive Midfielder",
+        "MC": "Midfielder", "CM": "Midfielder",
+        "ML": "Midfielder", "LM": "Midfielder",
+        "MR": "Midfielder", "RM": "Midfielder",
+        "AMC": "Attacking Midfielder", "AM": "Attacking Midfielder",
+        "AML": "Left Winger", "FWL": "Left Winger", "LW": "Left Winger",
+        "AMR": "Right Winger","FWR": "Right Winger","RW": "Right Winger",
+        "FW": "Striker", "ST": "Striker", "CF": "Striker",
         "Sub": "Substitute",
     }
 
-    # ---- normalize types to compare reliably
-    pid_str = str(player_id)
-    try:
-        pdd = player_data_df.copy()
-        pdd["playerId"] = pdd["playerId"].astype(str)
-    except Exception:
-        return "Midfielder"
+    def normalize_pid(df):
+        df = df.copy()
+        if "playerId" in df.columns:
+            df["playerId"] = df["playerId"].astype(str)
+        return df
 
-    # 1) Try player_data.position first
+    def most_frequent_non_sub(pos_series: pd.Series):
+        s = pos_series.dropna().astype(str)
+        s = s[s != "Sub"]
+        if s.empty:
+            return None
+        counts = Counter(s)
+        return counts.most_common(1)[0][0]  # raw code (e.g., AML)
+
+    # 0) Normalize ids
+    pid = str(player_id)
+    pdd = normalize_pid(player_data_df)
+    edd = normalize_pid(event_data_df)
+
+    # 1) Direct read from player_data if not 'Sub'
+    if "position" in pdd.columns:
+        raw_pd_positions = pdd.loc[pdd["playerId"] == pid, "position"].dropna().astype(str)
+    else:
+        raw_pd_positions = pd.Series(dtype=object)
+
+    if not raw_pd_positions.empty and (raw_pd_positions != "Sub").any():
+        # take the most recent non-Sub if you have dates; else the first non-Sub
+        if "matchDate" in pdd.columns:
+            subset = pdd[(pdd["playerId"] == pid) & (pdd["position"].notna()) & (pdd["position"] != "Sub")].copy()
+            subset["matchDate"] = pd.to_datetime(subset["matchDate"], errors="coerce")
+            subset = subset.sort_values("matchDate", ascending=False)
+            raw = subset["position"].iloc[0]
+        else:
+            raw = raw_pd_positions[raw_pd_positions != "Sub"].iloc[0]
+        return position_map.get(raw, raw)
+
+    # 2) If 'Sub' (or nothing), infer from events first
+    event_pos_cols = [c for c in ["position", "pos", "eventPosition"] if c in edd.columns]
+    if event_pos_cols:
+        ed_player = edd[edd["playerId"] == pid]
+        if "matchDate" in ed_player.columns:
+            ed_player = ed_player.assign(
+                matchDate=pd.to_datetime(ed_player["matchDate"], errors="coerce")
+            ).sort_values("matchDate", ascending=False)
+
+        # build a stacked series of positions (newest first) and pick the mode
+        stacked = pd.concat([ed_player[c] for c in event_pos_cols], axis=0, ignore_index=True)
+        raw_from_events = most_frequent_non_sub(stacked)
+        if raw_from_events:
+            return position_map.get(raw_from_events, raw_from_events)
+
+    # 3) Fallback: infer from player_data history (most frequent non-Sub)
+    if not raw_pd_positions.empty:
+        raw_from_pd = most_frequent_non_sub(raw_pd_positions)
+        if raw_from_pd:
+            return position_map.get(raw_from_pd, raw_from_pd)
+
+    # 4) Final fallback: return the raw DB value if available; else 'Unknown'
     try:
-        raw_position = (
-            pdd.loc[pdd["playerId"] == pid_str, "position"]
+        raw_db_value = (
+            pdd.loc[pdd["playerId"] == pid, "position"]
             .dropna()
             .astype(str)
             .values[0]
         )
+        return raw_db_value  # e.g., 'Sub'
     except Exception:
-        raw_position = None
-
-    if raw_position and raw_position != "Sub":
-        return position_map.get(raw_position, "Midfielder")
-
-    # 2) If 'Sub' or missing, infer from events
-    try:
-        edd = event_data_df.copy()
-        edd["playerId"] = edd["playerId"].astype(str)
-        edd = edd[(edd["playerId"] == pid_str)]
-        if "position" in edd.columns:
-            edd = edd[edd["position"].notna() & (edd["position"] != "Sub")]
-            if not edd.empty:
-                most_common = edd["position"].astype(str).value_counts().idxmax()
-                return position_map.get(most_common, "Midfielder")
-    except Exception:
-        pass
-
-    # 3) Safe default
-    return "Midfielder"
+        return "Unknown"
 
 
 
@@ -298,12 +330,6 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
     ps = ps[ps["playerId"] == pid].copy()
     # Use only playerId for filtering events (names can differ in casing/spacing)
     ev_player = ev[ev["playerId"] == pid].copy()
-
-    # Quick diagnostics (optional)
-    try:
-        st.caption(f"📦 player_stats rows (player): {len(ps)} | event_data rows (player): {len(ev_player)}")
-    except Exception:
-        pass
 
     # If no rows after filtering, return empty DF with expected join keys
     if ps.empty:
@@ -539,12 +565,6 @@ def process_player_metrics(player_stats, event_data, player_id, player_name):
         metrics_summary = metrics_summary.drop_duplicates(subset=["matchId"], keep="last").reset_index(drop=True)
     else:
         metrics_summary = metrics_summary.reset_index(drop=True)
-
-    # Final diag
-    try:
-        st.caption(f"✅ metrics_summary: {metrics_summary.shape[0]} rows, {metrics_summary.shape[1]} cols")
-    except Exception:
-        pass
 
     return metrics_summary
 
@@ -1741,141 +1761,277 @@ def plot_kpi_comparison(combined_metrics_df, metric_keys, metric_labels, player_
             st.altair_chart(chart, use_container_width=True)
 
 
-def process_player_comparison_metrics(stats_df, events_df, player_position):
+def process_player_comparison_metrics(player_stats: pd.DataFrame,
+                                      event_data: pd.DataFrame,
+                                      player_position: str | None = None) -> pd.DataFrame:
     """
-    Calculates summary metrics (KPIs) for multiple players for comparison purposes.
-    Applies the same logic as `process_player_metrics`, adapted for a batch of players.
+    Vectorized version of process_player_metrics for many players.
+    - Cleans & casts like your player function
+    - Reproduces the same event heuristics (xG/ps_xG, progressive, carries, etc.)
+    - Builds the same derived % KPIs and aliases
+    - Returns one row per (playerId, matchId)
+
+    Always returns a DataFrame (possibly empty).
     """
 
-    if stats_df.empty or events_df.empty:
-        st.warning("🚨 No stats or event data to process.")
+    import numpy as np
+    import pandas as pd
+
+    # -------- Guards --------
+    if not isinstance(player_stats, pd.DataFrame) or player_stats.empty:
         return pd.DataFrame()
+    if not isinstance(event_data, pd.DataFrame) or event_data.empty:
+        # return empty skeleton with keys so caller .concat works
+        return pd.DataFrame(columns=["playerId","matchId"]).astype({"playerId":"Int64","matchId":"Int64"})
 
-    # --- Step 1: Prepare IDs ---
-    stats_df["playerId"] = stats_df["playerId"].astype(str)
-    stats_df["matchId"] = stats_df["matchId"].astype(str)
-    events_df["playerId"] = events_df["playerId"].astype(str)
-    events_df["matchId"] = events_df["matchId"].astype(str)
+    ps = player_stats.copy()
+    ev = event_data.copy()
 
-    # --- Step 2: Clean numeric columns ---
-    metric_cols_stats = stats_df.columns.drop(['playerId', 'playerName', 'matchId', 'teamId', 'teamName'], errors='ignore')
-    for col in metric_cols_stats:
-        stats_df[col] = stats_df[col].astype(str).str.replace(",", ".", regex=False)
-        stats_df[col] = pd.to_numeric(stats_df[col], errors="coerce")
+    # Required columns
+    for c in ["playerId", "matchId"]:
+        if c not in ps.columns:
+            # provide skeleton
+            return pd.DataFrame(columns=["playerId","matchId"]).astype({"playerId":"Int64","matchId":"Int64"})
+    if "playerId" not in ev.columns: ev["playerId"] = np.nan
+    if "matchId"  not in ev.columns: ev["matchId"]  = np.nan
 
-    event_cols_to_clean = ['x', 'y', 'value_PassEndX', 'value_PassEndY', 'endX', 'endY', 'value_Length', 'xG', 'xA', 'ps_xG']
-    for col in event_cols_to_clean:
-        if col in events_df.columns:
-            events_df[col] = events_df[col].astype(str).str.replace(",", ".", regex=False)
-            events_df[col] = pd.to_numeric(events_df[col], errors="coerce")
+    # -------- Normalize IDs (Int64 like player function) --------
+    ps["playerId"] = pd.to_numeric(ps["playerId"], errors="coerce").astype("Int64")
+    ps["matchId"]  = pd.to_numeric(ps["matchId"],  errors="coerce").astype("Int64")
+    ev["playerId"] = pd.to_numeric(ev["playerId"], errors="coerce").astype("Int64")
+    ev["matchId"]  = pd.to_numeric(ev["matchId"],  errors="coerce").astype("Int64")
 
-    # --- Step 3: Event-based metrics ---
-    def calculate_event_metrics(df):
+    # If no rows after cleaning, return empty skeleton
+    if ps.dropna(subset=["playerId","matchId"]).empty:
+        return pd.DataFrame(columns=["playerId","matchId"]).astype({"playerId":"Int64","matchId":"Int64"})
+
+    # -------- Clean numeric-like object columns in player_stats --------
+    for col in ps.columns:
+        if ps[col].dtype == object:
+            ps[col] = pd.to_numeric(ps[col].astype(str).str.replace(',', '.', regex=False), errors="ignore")
+
+    # -------- Event metrics (with heuristic xG / ps_xG) --------
+    def calculate_event_metrics(df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["playerId","matchId"]).astype({"playerId":"Int64","matchId":"Int64"})
+
         df = df.copy()
 
-        passes_into_penalty_area = df[
-            (df['value_PassEndX'] >= 88.5) & (df['value_PassEndY'].between(13.6, 54.4))
-        ].groupby(['playerId', 'matchId']).size().rename('passes_into_penalty_area')
+        # Ensure fields exist with correct dtypes
+        for c in ["x","y","endX","endY","value_Length","value_PassEndX","value_PassEndY"]:
+            if c not in df.columns: df[c] = np.nan
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-        carries_into_final_third = df[
-            (df['x'] < 66.7) & (df['endX'] >= 66.7)
-        ].groupby(['playerId', 'matchId']).size().rename('carries_into_final_third')
+        # Binary flags → 0/1
+        bin_cols = [
+            "isShot","isGoal","value_Penalty","value_BigChance","value_OneOnOne",
+            "value_Head","value_LeftFoot","value_RightFoot",
+            "value_LowLeft","value_LowRight","value_HighLeft","value_HighRight","value_HighCentre","value_LowCentre",
+            "value_ShotAssist","value_Cross","value_IntentionalGoalAssist"
+        ]
+        for c in bin_cols:
+            if c not in df.columns: df[c] = 0
+            df[c] = (df[c].astype(str).str.strip().str.lower()
+                        .replace({"true":"1","false":"0","yes":"1","no":"0"}))
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
 
-        carries_into_penalty_area = df[
-            (df['endX'] >= 88.5) & (df['endY'].between(13.6, 54.4))
-        ].groupby(['playerId', 'matchId']).size().rename('carries_into_penalty_area')
+        # Strings used for masks
+        for c in ["type_displayName","outcomeType_displayName","qualifiers"]:
+            if c not in df.columns: df[c] = ""
+            df[c] = df[c].astype(str)
 
-        goals = df[df['type_displayName'] == 'Goal'].groupby(['playerId', 'matchId']).size().rename('goals')
-        assists = df[df['value_IntentionalGoalAssist'] == 1].groupby(['playerId', 'matchId']).size().rename('assists')
-        crosses = df[df['value_Cross'] == 1].groupby(['playerId', 'matchId']).size().rename('crosses')
+        # Identify shots robustly
+        shot_mask = (
+            (df["isShot"] == 1) |
+            (df["type_displayName"].isin(["Shot","SavedShot","Goal","Miss","ShotOnPost"])) |
+            (df["outcomeType_displayName"].isin(["Saved","Goal","Off T","Post"]))
+        )
 
-        long_passes = df[df['value_Length'] >= 30]
-        long_passes_total = long_passes.groupby(['playerId', 'matchId']).size().rename('long_passes_total')
-        long_passes_success = long_passes[long_passes['outcomeType_displayName'] == 'Successful']\
-            .groupby(['playerId', 'matchId']).size().rename('long_passes_success')
-        long_pass_pct = (long_passes_success / long_passes_total.replace(0, np.nan) * 100).rename('long_pass_pct')
+        # Geometry heuristics
+        dx = (100 - df["x"])
+        dy = (df["y"] - 50).abs()
+        dist = np.sqrt(np.square(dx) + np.square(dy))
+        angle = np.degrees(np.arctan2(5.5, dx.clip(lower=1e-6)))
+        in_six  = (df["endX"] >= 94)   & (df["endY"].between(44, 56))
+        in_box  = (df["endX"] >= 88.5) & (df["endY"].between(13.6, 54.4))
 
-        progressive_passes = df[
-            (df['type_displayName'] == 'Pass') &
-            (df['outcomeType_displayName'] == 'Successful') &
-            (df['value_Length'] >= 9.11) &
-            (df['x'] >= 35) &
-            (~df['qualifiers'].str.contains('CornerTaken|Freekick', na=False))
-        ].groupby(['playerId', 'matchId']).size().rename('progressive_passes')
+        # Heuristic xG
+        base_xg = np.where(in_six, 0.36,
+                    np.where(in_box & (dist < 8), 0.28,
+                    np.where(in_box & (dist < 12), 0.18,
+                    np.where(in_box & (dist < 18), 0.12,
+                    np.where(dist < 25, 0.06, 0.03)))))
+        base_xg = np.where(df["value_Penalty"] == 1, 0.76, base_xg)
+        base_xg = np.where(df["value_BigChance"] == 1, np.maximum(base_xg, 0.35), base_xg)
+        base_xg = np.where(df["value_OneOnOne"] == 1, base_xg + 0.10, base_xg)
+        base_xg = np.where(df["value_Head"] == 1, base_xg * 0.75, base_xg)
+        base_xg = np.where(angle < 15, base_xg * 0.70, base_xg)
+        base_xg = np.where(angle > 60, base_xg * 1.15, base_xg)
+        base_xg = np.where(~in_box, np.minimum(base_xg, 0.07), base_xg)
+        est_xg  = np.clip(base_xg, 0.01, 0.95)
+        est_xg  = np.where(shot_mask, est_xg, 0.0)
+
+        # ps_xG (post-shot)
+        on_target = df["type_displayName"].isin(["SavedShot","Goal"]) | (df["outcomeType_displayName"] == "Saved")
+        placement_mult = np.where(df["value_HighLeft"] | df["value_HighRight"], 1.25,
+                           np.where(df["value_LowLeft"] | df["value_LowRight"], 1.15,
+                           np.where(df["value_HighCentre"] | df["value_LowCentre"], 0.85, 1.00)))
+        goal_mask = (df["isGoal"] == 1) | (df["type_displayName"] == "Goal")
+        est_psxg  = np.where(on_target, est_xg * placement_mult, 0.0)
+        est_psxg  = np.where(goal_mask, est_psxg * 1.10, est_psxg)
+        est_psxg  = np.clip(est_psxg, 0.0, 1.2)
+
+        # Group helpers
+        def gsize(mask):
+            return df[mask].groupby(["playerId","matchId"]).size()
+
+        # Event KPIs (same as player version)
+        passes_into_pa = gsize((df["value_PassEndX"] >= 88.5) & (df["value_PassEndY"].between(13.6, 54.4))).rename("passes_into_penalty_area")
+        carries_ft     = gsize((df["x"] < 66.7) & (df["endX"] >= 66.7)).rename("carries_into_final_third")
+        carries_pa     = gsize((df["endX"] >= 88.5) & (df["endY"].between(13.6, 54.4))).rename("carries_into_penalty_area")
+
+        goals   = gsize(df["type_displayName"] == "Goal").rename("goals")
+        assists = gsize(df["value_IntentionalGoalAssist"] == 1).rename("assists")
+        crosses = gsize(df["value_Cross"] == 1).rename("crosses")
+
+        long_passes         = df[df["value_Length"] >= 30]
+        long_passes_total   = long_passes.groupby(["playerId","matchId"]).size().rename("long_passes_total")
+        long_passes_success = long_passes[long_passes["outcomeType_displayName"] == "Successful"] \
+                                .groupby(["playerId","matchId"]).size().rename("long_passes_success")
+        long_pass_pct       = (long_passes_success / long_passes_total.replace(0, np.nan) * 100).rename("long_pass_pct")
+
+        progressive_passes = gsize(
+            (df["type_displayName"] == "Pass") &
+            (df["outcomeType_displayName"] == "Successful") &
+            (df["value_Length"] >= 9.11) &
+            (df["x"] >= 35) &
+            (~df["qualifiers"].str.contains("CornerTaken|Freekick", na=False))
+        ).rename("progressive_passes")
 
         progressive_carry_distance = df[
-            (df['type_displayName'] == 'Carry') & ((df['endX'] - df['x']) >= 9.11)
-        ].assign(distance=lambda d: d['endX'] - d['x']) \
-        .groupby(['playerId', 'matchId'])['distance'].sum().rename('progressive_carry_distance')
+            (df["type_displayName"] == "Carry") & ((df["endX"] - df["x"]) >= 9.11)
+        ].assign(distance=lambda d: d["endX"] - d["x"]).groupby(["playerId","matchId"])["distance"].sum().rename("progressive_carry_distance")
 
-        def_actions_outside_box = df[
-            (df['x'] > 25) & df['type_displayName'].isin(['Tackle', 'Interception', 'Clearance'])
-        ].groupby(['playerId', 'matchId']).size().rename('def_actions_outside_box')
+        def_actions_ob = gsize((df["x"] > 25) & (df["type_displayName"].isin(["Tackle","Interception","Clearance"]))).rename("def_actions_outside_box")
+        recoveries     = gsize(df["type_displayName"] == "BallRecovery").rename("recoveries")
+        sca            = gsize(df["value_ShotAssist"] > 0).rename("shot_creation_actions")
 
-        recoveries = df[df['type_displayName'] == 'BallRecovery']\
-            .groupby(['playerId', 'matchId']).size().rename('recoveries')
+        # Heuristic xG/ps_xG/xA grouped
+        xg_series   = pd.Series(est_xg,  index=df.index, name="xG")
+        psxg_series = pd.Series(est_psxg,index=df.index, name="ps_xG")
+        xG    = xg_series[shot_mask].groupby([df.loc[shot_mask,"playerId"], df.loc[shot_mask,"matchId"]]).sum(min_count=1)
+        ps_xG = psxg_series[shot_mask].groupby([df.loc[shot_mask,"playerId"], df.loc[shot_mask,"matchId"]]).sum(min_count=1)
+        xA    = df.groupby(["playerId","matchId"])["value_ShotAssist"].sum(min_count=1).rename("xA")
 
-        shot_creation_actions = df[df['value_ShotAssist'] > 0]\
-            .groupby(['playerId', 'matchId']).size().rename('shot_creation_actions')
+        gca = goals.add(assists, fill_value=0).rename("goal_creating_actions")
 
-        xG = df.groupby(['playerId', 'matchId'])['xG'].sum().rename('xG')
-        xA = df.groupby(['playerId', 'matchId'])['xA'].sum().rename('xA')
-        ps_xG = df.groupby(['playerId', 'matchId'])['ps_xG'].sum().rename('ps_xG')
+        # GK-style metrics
+        saves = gsize((df["type_displayName"] == "SavedShot") & (df["outcomeType_displayName"] == "Successful")).rename("saves")
+        sot_faced = gsize((df["isShot"] == 1) & (df["type_displayName"].isin(["SavedShot","Goal"]))).rename("shots_on_target_faced")
+        goals_conceded = gsize((df["isShot"] == 1) & (df["type_displayName"] == "Goal")).rename("goals_conceded")
 
-        goal_creating_actions = goals.add(assists, fill_value=0).rename("goal_creating_actions")
-
-        saves = df[(df["type_displayName"] == "SavedShot") & (df["outcomeType_displayName"] == "Successful")]\
-            .groupby(["playerId", "matchId"]).size().rename("saves")
-
-        shots_on_target_faced = df[(df["isShot"] == 1) & df["type_displayName"].isin(["SavedShot", "Goal"])]\
-            .groupby(["playerId", "matchId"]).size().rename("shots_on_target_faced")
-
-        goals_conceded = df[(df["isShot"] == 1) & (df["type_displayName"] == "Goal")]\
-            .groupby(["playerId", "matchId"]).size().rename("goals_conceded")
-
-        return pd.concat([
-            passes_into_penalty_area,
-            carries_into_final_third,
-            carries_into_penalty_area,
+        out = pd.concat([
+            passes_into_pa, carries_ft, carries_pa,
             goals, assists, crosses,
             long_passes_total, long_passes_success, long_pass_pct,
             progressive_passes, progressive_carry_distance,
-            def_actions_outside_box, recoveries,
-            shot_creation_actions, goal_creating_actions,
+            def_actions_ob, recoveries,
+            sca, gca,
             xG, xA, ps_xG,
-            saves, shots_on_target_faced, goals_conceded
+            saves, sot_faced, goals_conceded
         ], axis=1).fillna(0).reset_index()
 
-    event_metrics = calculate_event_metrics(events_df)
+        # Ensure ids Int64
+        for c in ["playerId","matchId"]:
+            if c in out.columns:
+                out[c] = pd.to_numeric(out[c], errors="coerce").astype("Int64")
 
-    # --- Step 4: Merge event and stat metrics ---
-    combined_df = pd.merge(stats_df, event_metrics, on=["playerId", "matchId"], how="left").fillna(0)
+        return out
 
-    # --- Step 5: Derived KPIs ---
-    combined_df["pass_completion_pct"] = (combined_df["passesAccurate"] / combined_df["passesTotal"].replace(0, np.nan)) * 100
-    combined_df["aerial_duel_pct"] = (combined_df["aerialsWon"] / combined_df["aerialsTotal"].replace(0, np.nan)) * 100
-    combined_df["take_on_success_pct"] = (combined_df["dribblesWon"] / combined_df["dribblesAttempted"].replace(0, np.nan)) * 100
-    combined_df["shots_on_target_pct"] = (combined_df["shotsOnTarget"] / combined_df["shotsTotal"].replace(0, np.nan)) * 100
-    combined_df["tackle_success_pct"] = (combined_df["tackleSuccessful"] / combined_df["tacklesTotal"].replace(0, np.nan)) * 100
-    combined_df["throwin_accuracy_pct"] = (combined_df["throwInsAccurate"] / combined_df["throwInsTotal"].replace(0, np.nan)) * 100
-    combined_df["save_pct"] = (combined_df["saves"] / combined_df["shots_on_target_faced"].replace(0, np.nan)) * 100
+    event_metrics = calculate_event_metrics(ev)
 
-    combined_df["key_passes"] = combined_df["passesKey"]
-    combined_df["goal_creating_actions"] = combined_df["goal_creating_actions"].fillna(0)
-    combined_df["shot_creating_actions"] = combined_df["shotsTotal"] + combined_df["passesKey"]
+    # -------- Merge on keys --------
+    metrics = pd.merge(ps, event_metrics, on=["playerId","matchId"], how="left").fillna(0)
 
-    # Optional: goalkeeper extras
-    combined_df["claimsHigh"] = stats_df.get("claimsHigh", 0)
-    combined_df["collected"] = stats_df.get("collected", 0)
-    combined_df["totalSaves"] = stats_df.get("totalSaves", 0)
+    # -------- Derived KPIs / formatting (match player function) --------
+    def pct_from_counts(df, n, d):
+        return (df[n] / df[d].replace(0, np.nan) * 100)
 
-    # --- Step 6: Format ---
-    percent_cols = [
-        "pass_completion_pct", "aerial_duel_pct", "take_on_success_pct",
-        "shots_on_target_pct", "tackle_success_pct", "throwin_accuracy_pct",
-        "long_pass_pct", "save_pct"
-    ]
-    combined_df[percent_cols] = combined_df[percent_cols].clip(0, 100).round(1)
-    combined_df = combined_df.drop_duplicates(subset=["playerId", "matchId"], keep="last").reset_index(drop=True)
+    # Pass completion
+    if {"passesAccurate","passesTotal"}.issubset(metrics.columns):
+        metrics["pass_completion_pct"] = pct_from_counts(metrics, "passesAccurate","passesTotal")
+    elif "passSuccess" in metrics.columns:
+        metrics["pass_completion_pct"] = pd.to_numeric(metrics["passSuccess"], errors="coerce")
+    else:
+        metrics["pass_completion_pct"] = 0.0
 
-    return combined_df
+    # Aerial duels
+    if {"aerialsWon","aerialsTotal"}.issubset(metrics.columns):
+        metrics["aerial_duel_pct"] = pct_from_counts(metrics, "aerialsWon","aerialsTotal")
+    elif "aerialSuccess" in metrics.columns:
+        metrics["aerial_duel_pct"] = pd.to_numeric(metrics["aerialSuccess"], errors="coerce")
+    else:
+        metrics["aerial_duel_pct"] = 0.0
+
+    # Take-ons
+    if {"dribblesWon","dribblesAttempted"}.issubset(metrics.columns):
+        metrics["take_on_success_pct"] = pct_from_counts(metrics, "dribblesWon","dribblesAttempted")
+    elif "dribbleSuccess" in metrics.columns:
+        metrics["take_on_success_pct"] = pd.to_numeric(metrics["dribbleSuccess"], errors="coerce")
+    else:
+        metrics["take_on_success_pct"] = 0.0
+
+    # Tackles
+    if {"tackleSuccessful","tacklesTotal"}.issubset(metrics.columns):
+        metrics["tackle_success_pct"] = pct_from_counts(metrics, "tackleSuccessful","tacklesTotal")
+    elif "tackleSuccess" in metrics.columns:
+        metrics["tackle_success_pct"] = pd.to_numeric(metrics["tackleSuccess"], errors="coerce")
+    else:
+        metrics["tackle_success_pct"] = 0.0
+
+    # Throw-ins
+    if {"throwInsAccurate","throwInsTotal"}.issubset(metrics.columns):
+        metrics["throwin_accuracy_pct"] = pct_from_counts(metrics, "throwInsAccurate","throwInsTotal")
+    elif "throwInAccuracy" in metrics.columns:
+        metrics["throwin_accuracy_pct"] = pd.to_numeric(metrics["throwInAccuracy"], errors="coerce")
+    else:
+        metrics["throwin_accuracy_pct"] = 0.0
+
+    # Shots on target %
+    if {"shotsOnTarget","shotsTotal"}.issubset(metrics.columns):
+        metrics["shots_on_target_pct"] = pct_from_counts(metrics, "shotsOnTarget","shotsTotal")
+    else:
+        metrics["shots_on_target_pct"] = 0.0
+
+    # Save %
+    if {"saves","shots_on_target_faced"}.issubset(metrics.columns):
+        metrics["save_pct"] = (metrics["saves"] / metrics["shots_on_target_faced"].replace(0, np.nan)) * 100
+    else:
+        metrics["save_pct"] = 0.0
+
+    # Aliases / passthroughs
+    metrics["key_passes"] = metrics["passesKey"] if "passesKey" in metrics.columns else 0
+    if "goal_creating_actions" not in metrics.columns:
+        metrics["goal_creating_actions"] = 0
+    # Use counts for SCA if present + shotsTotal (same rule you use)
+    if "shot_creation_actions" in metrics.columns and "shotsTotal" in metrics.columns:
+        metrics["shot_creating_actions"] = metrics["shot_creation_actions"] + metrics["shotsTotal"]
+    elif "shotsTotal" in metrics.columns:
+        metrics["shot_creating_actions"] = metrics["shotsTotal"]
+    else:
+        metrics["shot_creating_actions"] = 0
+
+    # Round percentages
+    for c in ["pass_completion_pct","aerial_duel_pct","take_on_success_pct",
+              "shots_on_target_pct","tackle_success_pct","throwin_accuracy_pct",
+              "long_pass_pct","save_pct"]:
+        if c in metrics.columns:
+            metrics[c] = pd.to_numeric(metrics[c], errors="coerce").round(1).fillna(0)
+
+    # De-dupe by (playerId, matchId) like player function does by matchId (per player)
+    if {"playerId","matchId"}.issubset(metrics.columns):
+        metrics = metrics.drop_duplicates(subset=["playerId","matchId"], keep="last").reset_index(drop=True)
+    else:
+        metrics = metrics.reset_index(drop=True)
+
+    return metrics
