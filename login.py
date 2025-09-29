@@ -62,7 +62,7 @@ try:
     st.image(logo, width=100)
 except FileNotFoundError:
     st.error("Logo image not found. Please check the image path.")
-st.title("Watford Player Development1")
+st.title("Watford Player Development")
 
 # Inicializar variables de sesión si no existen
 if "logged_in" not in st.session_state:

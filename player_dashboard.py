@@ -50,47 +50,42 @@ is_staff = st.session_state.user_type == "staff"
 def load_players_list() -> Dict[str, Dict[str, Any]]:
     """
     Load players from data/watford_players_login_info.[xlsx|csv].
-    Normalizes playerId to STRING (or None) to avoid dtype issues in the UI.
+    Expected columns (preferred): playerId, playerName, activo
+    Falls back gracefully if playerId is missing.
+    Returns a dict keyed by a staff-facing label, with values containing id and name.
     """
     try:
         base_csv = os.path.join('data', 'watford_players_login_info.csv')
         base_xlsx = os.path.join('data', 'watford_players_login_info.xlsx')
 
         if os.path.exists(base_csv):
-            # Force playerId as string
-            players_df = pd.read_csv(base_csv, dtype={"playerId": "string"})
+            players_df = pd.read_csv(base_csv)
         elif os.path.exists(base_xlsx):
-            # Excel: use converters to keep as string (preserve leading zeros)
-            players_df = pd.read_excel(base_xlsx, converters={"playerId": lambda x: str(x).strip() if pd.notna(x) else None})
+            players_df = pd.read_excel(base_xlsx)
         else:
-            st.warning("No players file found. Upload CSV/XLSX with columns: playerId, playerName, activo.")
+            st.warning("No players file found. Please upload a file (CSV or XLSX) with columns like playerId, playerName, activo.")
             return {}
 
         # Normalize column names
-        players_df.columns = [str(c).strip() for c in players_df.columns]
+        players_df.columns = [c.strip() for c in players_df.columns]
 
         # Validate columns
         if 'playerName' not in players_df.columns:
             st.error("❌ Column 'playerName' is required in the players file.")
             return {}
 
-        # activo handling → 1 active, 0 inactive
+        # activo handling
         if 'activo' in players_df.columns:
             players_df['activo'] = pd.to_numeric(players_df['activo'], errors='coerce').fillna(1).astype(int)
         else:
             players_df['activo'] = 1
 
-        # Ensure playerId exists and is string/None
+        # Allow missing playerId, but warn
         has_id = 'playerId' in players_df.columns
-        if has_id:
-            # Make sure it's clean string with NaN→None
-            players_df['playerId'] = players_df['playerId'].astype('string')
-            players_df['playerId'] = players_df['playerId'].where(players_df['playerId'].notna(), None)
-            players_df['playerId'] = players_df['playerId'].apply(lambda x: x.strip() if isinstance(x, str) else x)
-        else:
-            st.warning("⚠️ Column 'playerId' not found. Some features may fail.")
+        if not has_id:
+            st.warning("⚠️ Column 'playerId' not found. Staff selection will not provide IDs; some features may fail.")
 
-        players: Dict[str, Dict[str, Any]] = {}
+        players = {}
         for _, row in players_df.iterrows():
             full_name = str(row.get('playerName', '')).strip()
             if not full_name:
@@ -98,9 +93,12 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
             pid = row.get('playerId', None) if has_id else None
             activo = int(row.get('activo', 1))
 
-            label = f"{full_name}{'' if activo == 1 else ' (Inactive)'}"
+            # Staff-visible label
+            status = "" if activo == 1 else " (Inactive)"
+            label = f"{full_name}{status}" if has_id else f"{full_name}{status}"
+
             players[label] = {
-                "playerId": pid if pid not in (None, "", "nan") else None,  # keep as string or None
+                "playerId": None if pd.isna(pid) else str(pid) if pid is not None else None,
                 "playerName": full_name,
                 "activo": activo,
             }
@@ -113,89 +111,115 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
         st.error(traceback.format_exc())
         return {}
 
+
 def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
     """
-    Returns (player_id, player_name) as STRINGS.
-    - Staff: pick from selector (playerId stays string or None → error).
-    - Player: read from session_state set at login.
+    Returns (player_id, player_name) for the current session.
+    - Staff: from sidebar selector (requires players file; prefers playerId).
+    - Player: from session_state set at login (expects player_id & player_name OR player_info dict).
+    Raises Streamlit stop if missing info.
     """
     if is_staff:
         st.subheader("Player Dashboard")
-        st.write(f"Staff: {st.session_state.get('staff_info', {}).get('full_name', 'User')}")
+        # Show staff info if available
+        st.write(f"Staff: {st.session_state.staff_info['full_name']}" if 'staff_info' in st.session_state else "Staff User")
 
+        # Manage players button (optional)
         if st.button("⚙️ Manage players list"):
-            try:
-                st.switch_page("pages/manage_players.py")
-            except Exception:
-                st.info("Open 'manage players' from the sidebar.")
+            if switch_page:
+                switch_page("manage_players")
+            else:
+                st.info("Use the page menu to open 'Manage Players'.")
 
+        # Load players and build selector
         players = load_players_list()
         if not players:
             st.stop()
 
         # Filter by status
-        status_choice = st.selectbox("Filter Players by Status",
-                                     ["All Players", "Active Players", "Inactive Players"],
-                                     key="player_status_filter")
+        player_status_filter = st.selectbox(
+            "Filter Players by Status",
+            options=["All Players", "Active Players", "Inactive Players"],
+            key="player_status_filter"
+        )
 
         filtered = {}
         for label, data in players.items():
-            if status_choice == "Active Players" and data["activo"] != 1:
+            if player_status_filter == "Active Players" and data["activo"] != 1:
                 continue
-            if status_choice == "Inactive Players" and data["activo"] == 1:
+            if player_status_filter == "Inactive Players" and data["activo"] == 1:
                 continue
             filtered[label] = data
 
         options = list(filtered.keys())
-        if status_choice == "All Players":
+        if player_status_filter == "All Players":
             options = [""] + options
 
-        selected = st.selectbox("Select Player", options=options, index=0 if status_choice == "All Players" else None,
-                                key="player_selector")
+        selected = st.selectbox("Select Player", options=options, key="player_selector",
+                                index=0 if player_status_filter == "All Players" else None)
 
-        # Sidebar: logout
+        # File tools
+        st.markdown("---")
+        with st.expander("Player File Management", expanded=False):
+            uploaded_file = st.file_uploader("Upload Players File", type=['csv', 'xlsx'])
+            if uploaded_file is not None:
+                try:
+                    if uploaded_file.name.endswith('.csv'):
+                        up_df = pd.read_csv(uploaded_file)
+                        out_path = os.path.join('data', 'watford_players_login_info.csv')
+                        up_df.to_csv(out_path, index=False)
+                    else:
+                        up_df = pd.read_excel(uploaded_file)
+                        out_path = os.path.join('data', 'watford_players_login_info.xlsx')
+                        up_df.to_excel(out_path, index=False)
+                    st.success(f"Players file saved to {out_path}")
+                    st.experimental_rerun()
+                except Exception as e:
+                    st.error(f"❌ Error saving file: {e}")
+
+        # Logout
         st.sidebar.markdown("---")
         st.sidebar.subheader("User Info")
-        si = st.session_state.get("staff_info", {})
-        st.sidebar.write(f"**Name:** {si.get('full_name','')}")
-        st.sidebar.write(f"**Role:** {si.get('role','')}")
+        if "staff_info" in st.session_state:
+            st.sidebar.write(f"**Name:** {st.session_state.staff_info.get('full_name','')}")
+            st.sidebar.write(f"**Role:** {st.session_state.staff_info.get('role','')}")
+
         if st.sidebar.button("Logout", type="primary"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
-            st.switch_page("Login.py")
+            st.rerun()
 
         if not selected:
             st.warning("Please select a player")
             st.stop()
 
-        sel = filtered[selected]
-        pid = sel.get("playerId")
-        pname = sel.get("playerName", "")
+        sel_data = filtered[selected]
+        pid = sel_data.get("playerId")
+        pname = sel_data.get("playerName")
 
-        if pid is None or str(pid).strip() == "":
+        if pid is None:
             st.error("Selected player has no 'playerId'. Add a 'playerId' column to your players file.")
             st.stop()
 
-        # Always return strings
-        return str(pid).strip(), str(pname).strip()
+        return str(pid), pname
 
-    # Player flow (from session)
-    pid = (st.session_state.get("player_id")
-           or st.session_state.get("playerInfo", {}).get("player_id")
-           or st.session_state.get("player_info", {}).get("player_id")
-           or st.session_state.get("player_info", {}).get("playerId"))
-    pname = (st.session_state.get("player_name")
-             or st.session_state.get("playerInfo", {}).get("player_name")
-             or st.session_state.get("player_info", {}).get("player_name")
-             or st.session_state.get("player_info", {}).get("full_name")
-             or st.session_state.get("player_info", {}).get("playerName"))
+    # Player (non-staff) flow: get from session_state (set during login)
+    # Try common keys used in the app
+    pid = (st.session_state.get("player_id") or
+           st.session_state.get("playerInfo", {}).get("player_id") or
+           st.session_state.get("player_info", {}).get("player_id") or
+           st.session_state.get("player_info", {}).get("playerId"))
+    pname = (st.session_state.get("player_name") or
+             st.session_state.get("playerInfo", {}).get("player_name") or
+             st.session_state.get("player_info", {}).get("player_name") or
+             st.session_state.get("player_info", {}).get("full_name") or
+             st.session_state.get("player_info", {}).get("playerName"))
 
     if not pid or not pname:
-        st.error("Could not resolve player from session. Ensure login sets 'player_id' and 'player_name'.")
+        st.error("Could not resolve player from session. Ensure login sets 'player_id' and 'player_name' (or player_info dict).")
         st.stop()
 
-    return str(pid).strip(), str(pname).strip()
-
+    return str(pid), str(pname)
 
 
 # >>> Call the resolver BEFORE using player_name <<<
