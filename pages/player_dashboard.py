@@ -147,10 +147,12 @@ def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
             filtered[label] = data
 
         options = list(filtered.keys())
+        # sort case-insensitive
+        options_sorted = sorted(options, key=lambda s: s.lower())
         if status_choice == "All Players":
-            options = [""] + options
+            options_sorted = [""] + options_sorted
 
-        selected = st.selectbox("Select Player", options=options, index=0 if status_choice == "All Players" else None,
+        selected = st.selectbox("Select Player", options=options_sorted, index=0 if status_choice == "All Players" else None,
                                 key="player_selector")
 
         # Sidebar: logout
@@ -162,7 +164,7 @@ def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
         if st.sidebar.button("Logout", type="primary"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
-            st.switch_page("Login.py")
+            st.switch_page("login.py")
 
         if not selected:
             st.warning("Please select a player")
@@ -201,14 +203,78 @@ def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
 # >>> Call the resolver BEFORE using player_name <<<
 player_id, player_name = resolve_current_player(is_staff)
 
+# For players: hide multipage nav links and show a Logout button
+if not is_staff:
+    st.markdown(
+        """
+        <style>
+            /* Hide Streamlit multipage navigation list in sidebar for players */
+            section[data-testid="stSidebarNav"],
+            div[data-testid="stSidebarNav"] {
+                display: none !important;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Menu")
+    if st.sidebar.button("Logout", type="primary"):
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.switch_page("login.py")
+
 # Page title
 
-# Your dashboard
-try:
-    logo = Image.open(LOGO_PATH)
-    st.image(logo, width=100)
-except FileNotFoundError:
-    st.error("Logo image not found. Please check the image path.")
+# Global CSS tweak requested
+st.markdown(
+    """
+    <style>
+      .st-emotion-cache-zy6yx3 { 
+      padding-top: 0rem !important; 
+      padding-left: 5rem !important;
+      padding-right: 5rem !important;
+      }
+      .st-emotion-cache-1ip4023 {
+      padding-top: 0rem !important;
+      }
+
+      .st-emotion-cache-595tnf {
+      background-size: 30% auto; !important;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Sidebar header logo via CSS background
+def inject_sidebar_logo():
+    try:
+        img = Image.open(LOGO_PATH)
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        st.markdown(
+            f"""
+            <style>
+            div[data-testid="stSidebarHeader"] {{
+                background-image: url('data:image/png;base64,{b64}');
+                background-repeat: no-repeat;
+                background-position: center;
+                background-size: 90% auto;
+                min-height: 100px;
+                margin-bottom: 0.25rem;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
+
+inject_sidebar_logo()
+
+# Page title
 st.title(f"{player_name}")
 
 # --- Load Data ---
@@ -703,7 +769,7 @@ if non_null_rate == 0:
     st.stop()
 
 # ------------------------------
-# Sidebar: Season (on top) + Time
+# Sidebar: Season (on top) + Time (both roles)
 # ------------------------------
 st.sidebar.header("Season & Time Filters")
 
@@ -770,7 +836,7 @@ else:
 # -- Dynamically assigned KPIs
 metric_keys = selected_kpis
 
-# --- Native Watford-Styled Section Selector ---
+# --- Section Selector (both roles) ---
 st.sidebar.header("Select Visualization")
 section = st.sidebar.radio(
     "Go to section:",

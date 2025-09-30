@@ -2,6 +2,8 @@
 import os
 import streamlit as st
 from PIL import Image
+import base64
+from io import BytesIO
 
 # Obtener la ruta absoluta al directorio del proyecto
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -21,13 +23,44 @@ if "logged_in" not in st.session_state or not st.session_state.logged_in or st.s
     st.warning("You must be logged in as staff to view this page.")
     st.stop()
 
-# Mostrar logo y título
-try:
-    logo = Image.open(LOGO_PATH)
-    st.image(logo, width=100)
-except FileNotFoundError:
-    st.error("Logo image not found. Please check the image path.")
+# Global CSS tweak requested
+st.markdown(
+    """
+    <style>
+      .st-emotion-cache-zy6yx3 { padding: 0rem !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
+# Sidebar header logo via CSS background
+def inject_sidebar_logo():
+    try:
+        img = Image.open(LOGO_PATH)
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        st.markdown(
+            f"""
+            <style>
+            div[data-testid=\"stSidebarHeader\"] {{
+                background-image: url('data:image/png;base64,{b64}');
+                background-repeat: no-repeat;
+                background-position: center;
+                background-size: 90% auto;
+                min-height: 100px;
+                margin-bottom: 0.25rem;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
+
+inject_sidebar_logo()
+
+# Main title
 st.title("Watford Staff Dashboard")
 
 # Navegación

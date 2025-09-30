@@ -173,7 +173,7 @@ def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
                         out_path = os.path.join('data', 'watford_players_login_info.xlsx')
                         up_df.to_excel(out_path, index=False)
                     st.success(f"Players file saved to {out_path}")
-                    st.experimental_rerun()
+                    st.rerun()
                 except Exception as e:
                     st.error(f"❌ Error saving file: {e}")
 
