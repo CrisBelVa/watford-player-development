@@ -3,7 +3,7 @@
 
 import pandas as pd
 import sys
-
+ 
 try:
     # Leer el archivo Excel
     file_path = '/Users/lucas/Desktop/DPTO PRACTICAS PROF/WATFORD/watford-player-development/data/Individuals - Training bkp.xlsx'

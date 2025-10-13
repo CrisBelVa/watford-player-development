@@ -963,7 +963,7 @@ if section == "Overview Stats":
         .first()
         .reset_index()
     )
-
+    teams_info.to_excel("teams_info_lucas.xlsx")
     summary_df = metrics_summary.copy()
     summary_df = summary_df.merge(teams_info, on="matchId", how="left")
 
@@ -987,15 +987,15 @@ if section == "Overview Stats":
         (summary_df["matchDate"].dt.date <= end_date)
     )
     filtered_df = summary_df.loc[mask].copy()
-
+    filtered_df.to_excel("filtered_df_lucas0.xlsx")
     # Drop duplicated matchId
     filtered_df = filtered_df.drop_duplicates(subset="matchId", keep="last")
-
+    filtered_df.to_excel("filtered_df_lucas2.xlsx")
     # ⚠️ DO NOT blanket fillna(0) on the whole DF – it corrupts strings into ints (root cause of your error).
     # Instead, only fill NaNs on numeric columns.
     num_cols = filtered_df.select_dtypes(include=["number"]).columns
     filtered_df[num_cols] = filtered_df[num_cols].fillna(0)
-
+    filtered_df.to_excel("filtered_df_lucas2.xlsx")
     # Ensure team names are present (merge again if needed)
     if "oppositionTeamName" not in filtered_df.columns:
         teams_info = (
@@ -1004,12 +1004,24 @@ if section == "Overview Stats":
             .reset_index()
         )
         filtered_df = filtered_df.merge(teams_info, on="matchId", how="left")
+    else:
+        filtered_df = filtered_df.copy()
+
+    # if "oppositionTeamName" not in filtered_df.columns:
+    #     teams_info = (
+    #         event_data.groupby("matchId")[["teamName", "oppositionTeamName"]]
+    #         .first()
+    #         .reset_index()
+    #     )
+    #     filtered_df = filtered_df.merge(teams_info, on="matchId", how="left")
 
     # --- Create readable match labels (robust casting to string) ---
     date_str = filtered_df["matchDate"].dt.strftime("%Y-%m-%d").fillna("Unknown date")
+      
     opp_str = filtered_df["oppositionTeamName"].astype("string").fillna("Unknown")
+    #opp_str = filtered_df["oppositionTeamName"]
     filtered_df["match_label"] = date_str + " vs " + opp_str
-
+    filtered_df.to_excel("filtered_df_lucas3.xlsx")
     # --- Match Filter Styled Like Excel ---
     with st.expander("Filter by Match (click to hide)", expanded=True):
         match_options = (
@@ -1556,7 +1568,9 @@ elif section == "Player Comparison":
     logged_player_id = str(player_id)
     logged_player_name = player_name
     default_ids = player_index.head(5)["playerId"].astype(str).tolist()
-    if logged_player_id not in default_ids:
+
+    # ✅ VALIDAR que el logged player existe en options_ids antes de agregarlo
+    if logged_player_id in options_ids and logged_player_id not in default_ids:
         default_ids = ([logged_player_id] + [pid for pid in default_ids if pid != logged_player_id])[:5]
 
     # Pretty labels
@@ -1571,7 +1585,7 @@ elif section == "Player Comparison":
         selected_player_ids = st.multiselect(
             "Select players to compare",
             options=options_ids,
-            default=default_ids,
+            default=default_ids,  # ✅ Ahora solo contiene IDs que existen en options
             format_func=lambda pid: label_map.get(str(pid), str(pid))
         )
 
