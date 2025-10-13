@@ -60,3 +60,17 @@ env/
 ~$*.xltm
 ~$*.xlt
 ~$*.xls
+.env
+
+# Python
+venv_py312/
+.python-version
+*.pyc
+__pycache__/
+
+# Backups
+data/backup_*.xlsx
+
+# Logs
+nohup.out
+*.log
