@@ -95,12 +95,19 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
             full_name = str(row.get('playerName', '')).strip()
             if not full_name:
                 continue
-            pid = row.get('playerId', None) if has_id else None
+            raw_pid = row.get('playerId', None) if has_id else None
+            # Clean playerId robustly: treat pd.NA/NaN/None/empty strings as None
+            if pd.isna(raw_pid):
+                clean_pid = None
+            else:
+                s = str(raw_pid).strip()
+                clean_pid = None if s == '' or s.lower() in ('nan', 'none') else s
+
             activo = int(row.get('activo', 1))
 
             label = f"{full_name}{'' if activo == 1 else ' (Inactive)'}"
             players[label] = {
-                "playerId": pid if pid not in (None, "", "nan") else None,  # keep as string or None
+                "playerId": clean_pid,  # keep as string or None
                 "playerName": full_name,
                 "activo": activo,
             }
