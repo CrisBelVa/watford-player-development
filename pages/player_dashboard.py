@@ -17,7 +17,6 @@ from math import ceil
 from typing import Tuple, Dict, Any
 from sqlalchemy import create_engine
 from pandas.io.formats.style import Styler
-from fpdf import FPDF
 import streamlit.components.v1 as components  # ✅ needed for working HTML injection
 
 # Optional: helper to navigate between pages
