@@ -17,18 +17,19 @@ from math import ceil
 from typing import Tuple, Dict, Any
 from sqlalchemy import create_engine
 from pandas.io.formats.style import Styler
+import streamlit.components.v1 as components  # ✅ needed for working HTML injection
+
 # Optional: helper to navigate between pages
 try:
     from streamlit_extras.switch_page_button import switch_page
 except ModuleNotFoundError:
     switch_page = None
 
-# Configuración de la página - DEBE SER EL PRIMER COMANDO DE STREAMLIT
+
+# === PAGE CONFIGURATION ===
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG_DIR = os.path.join(BASE_DIR, 'img')
 LOGO_PATH = os.path.join(IMG_DIR, 'watford_logo.png')
-
-
 
 st.set_page_config(
     page_title="Watford Player Development Hub",
@@ -37,13 +38,108 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Verificar autenticación
+# === AUTHENTICATION CHECK ===
 if "logged_in" not in st.session_state or not st.session_state.logged_in:
     st.warning("You must be logged in to view this page.")
     st.stop()
 
-# Verificar si el usuario es staff o jugador
+# Determine user type
 is_staff = st.session_state.user_type == "staff"
+
+# =============================================================
+# === GLOBAL DOWNLOAD PDF BUTTON (visible for staff & players) ===
+# Captures the visible Streamlit page and downloads it as PDF
+# =============================================================
+
+# --- PRINT-TO-PDF BUTTON + PRINT CSS (captures full page, multi-page, crisp) ---
+player_name = (st.session_state.get("player_name") or "Player").replace(" ", "_")
+section_name = (st.session_state.get("current_section") or "Overview").replace(" ", "_")
+pdf_title = f"{player_name}_{section_name}_Watford_Dashboard"
+
+components.html(
+    f"""
+    <html>
+    <head>
+      <style>
+        /* Floating button */
+        #print-btn {{
+          position: fixed; top: 15px; right: 25px;
+          background-color: #FFD700; color: #000;
+          padding: 8px 14px; border: none; border-radius: 10px;
+          font-weight: 600; cursor: pointer; z-index: 999999;
+          box-shadow: 1px 1px 6px rgba(0,0,0,0.3);
+        }}
+        #print-btn:hover {{ background-color: #ffea61; }}
+
+        /* PRINT STYLES: full-page export, clean layout */
+        @page {{
+          size: A4 portrait;              /* change to 'landscape' if you prefer */
+          margin: 10mm;                   /* page margins */
+        }}
+        @media print {{
+          /* Hide Streamlit chrome */
+          header, footer, [data-testid="stToolbar"],
+          [data-testid="stSidebar"], .stDeployButton, .viewerBadge_container__1QSob {{
+            display: none !important;
+          }}
+
+          /* Make background white and use all width */
+          .stApp, body {{
+            background: #ffffff !important;
+          }}
+
+          /* Tighten top/bottom padding for print */
+          .block-container {{
+            padding-top: 0 !important;
+            padding-bottom: 0 !important;
+            max-width: 100% !important;     /* use full width on print */
+          }}
+
+          /* Avoid broken cards/charts across pages */
+          .element-container, .stPlotlyChart, .js-plotly-plot, .stAltairChart,
+          .stMarkdown, .stDataFrame, .stTable {{
+            break-inside: avoid-page;
+            page-break-inside: avoid;
+          }}
+
+          /* Hide the button itself on the PDF */
+          #print-btn {{ display: none !important; }}
+        }}
+      </style>
+    </head>
+    <body>
+      <button id="print-btn">📄 Download PDF</button>
+
+      <script>
+        function printWholeApp() {{
+          try {{
+            const doc = parent && parent.document ? parent.document : document;
+            if (!doc) return window.print();
+
+            // Set a descriptive title so browsers use it as the PDF filename
+            const previousTitle = doc.title;
+            doc.title = "{pdf_title}";
+
+            // Give the DOM a tick to apply styles, then print
+            setTimeout(() => {{
+              (parent && parent.window ? parent.window : window).print();
+
+              // Restore the original title afterwards
+              setTimeout(() => {{ doc.title = previousTitle; }}, 750);
+            }}, 100);
+          }} catch (e) {{
+            // Fallback
+            window.print();
+          }}
+        }}
+
+        document.getElementById("print-btn").addEventListener("click", printWholeApp);
+      </script>
+    </body>
+    </html>
+    """,
+    height=60
+)
 
 # ---- Resolve current player (works for staff and players) ----
 
@@ -57,33 +153,26 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
         base_xlsx = os.path.join('data', 'watford_players_login_info.xlsx')
 
         if os.path.exists(base_csv):
-            # Force playerId as string
             players_df = pd.read_csv(base_csv, dtype={"playerId": "string"})
         elif os.path.exists(base_xlsx):
-            # Excel: use converters to keep as string (preserve leading zeros)
             players_df = pd.read_excel(base_xlsx, converters={"playerId": lambda x: str(x).strip() if pd.notna(x) else None})
         else:
             st.warning("No players file found. Upload CSV/XLSX with columns: playerId, playerName, activo.")
             return {}
 
-        # Normalize column names
         players_df.columns = [str(c).strip() for c in players_df.columns]
 
-        # Validate columns
         if 'playerName' not in players_df.columns:
             st.error("❌ Column 'playerName' is required in the players file.")
             return {}
 
-        # activo handling → 1 active, 0 inactive
         if 'activo' in players_df.columns:
             players_df['activo'] = pd.to_numeric(players_df['activo'], errors='coerce').fillna(1).astype(int)
         else:
             players_df['activo'] = 1
 
-        # Ensure playerId exists and is string/None
         has_id = 'playerId' in players_df.columns
         if has_id:
-            # Make sure it's clean string with NaN→None
             players_df['playerId'] = players_df['playerId'].astype('string')
             players_df['playerId'] = players_df['playerId'].where(players_df['playerId'].notna(), None)
             players_df['playerId'] = players_df['playerId'].apply(lambda x: x.strip() if isinstance(x, str) else x)
@@ -95,19 +184,14 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
             full_name = str(row.get('playerName', '')).strip()
             if not full_name:
                 continue
-            raw_pid = row.get('playerId', None) if has_id else None
-            # Clean playerId robustly: treat pd.NA/NaN/None/empty strings as None
-            if pd.isna(raw_pid):
-                clean_pid = None
-            else:
-                s = str(raw_pid).strip()
-                clean_pid = None if s == '' or s.lower() in ('nan', 'none') else s
-
+            pid = row.get('playerId', None) if has_id else None
             activo = int(row.get('activo', 1))
-
             label = f"{full_name}{'' if activo == 1 else ' (Inactive)'}"
+            # Handle pandas NA values properly
+            if pd.isna(pid) or pid in (None, "", "nan"):
+                pid = None
             players[label] = {
-                "playerId": clean_pid,  # keep as string or None
+                "playerId": pid,
                 "playerName": full_name,
                 "activo": activo,
             }
@@ -268,9 +352,12 @@ def inject_sidebar_logo():
                 background-image: url('data:image/png;base64,{b64}');
                 background-repeat: no-repeat;
                 background-position: center;
-                background-size: 90% auto;
-                min-height: 100px;
-                margin-bottom: 0.25rem;
+                background-size: contain;
+                max-width: 200px;
+                max-height: 80px;
+                min-height: 80px;
+                margin: 0 auto 0.5rem auto;
+                padding: 10px;
             }}
             </style>
             """,
@@ -1486,161 +1573,178 @@ elif section == "Player Comparison":
 
     # Build season-aware players query
   # --- Query players in scope (season + competition + position + teams + date window)
-    base_query = f"""
-        SELECT 
-            ps.playerId,
-            ps.playerName,
-            pd.age,
-            pd.shirtNo,
-            pd.height,
-            pd.weight,
-            ps.teamId,
-            pd.isFirstEleven,
-            ps.matchId,
-            md.startDate
-        FROM player_stats ps
-        JOIN player_data pd 
-            ON ps.playerId = pd.playerId AND ps.matchId = pd.matchId
-        JOIN match_data md 
-            ON ps.matchId = md.matchId
-        WHERE pd.position IN ({','.join([f"'{pos}'" for pos in position_codes])})
-        AND ps.teamId IN ({selected_team_ids_str})
-        AND LOWER(md.competition) = %s
-    """
-    params = [COMPETITION]
+    # ---------------------------
+    # 1) LOAD RAW TABLES (no joins)
+# ---------------------------
+# PLAYER COMPARISON — LOAD & SUMMARIZE DATA
+# (Mirrors load_player_data logic exactly)
+# ---------------------------
 
-    if selected_season:
-        base_query += " AND md.season = %s"
-        params.append(selected_season)
+    # ---------------------------
+# PLAYER COMPARISON — LOAD & SUMMARIZE DATA
+# ---------------------------
 
-    # still honor the sidebar date window (already constrained by season if set)
-    base_query += " AND md.startDate BETWEEN %s AND %s"
-    params.extend([start_date, end_date])
+    # ---------------------------
+# PLAYER COMPARISON — LOAD & SUMMARIZE DATA
+# ---------------------------
 
-    players_full = pd.read_sql(base_query, connect_to_db(), params=tuple(params))
+    conn = connect_to_db()
 
-    # --- Minutes from your prepared player_data (already in memory)
-    minutes_df = player_data.loc[:, ["playerId", "matchId", "minutesPlayed"]].copy()
+    # --- 1) LOAD RAW TABLES ---
+    pd_cols = [
+        "playerId","playerName","age","shirtNo","height","weight",
+        "teamId","isFirstEleven","matchId","position",
+        "subbedInExpandedMinute","subbedOutExpandedMinute"
+    ]
+    md_cols = ["matchId","startDate","competition","season"]
+    td_cols = ["team_id","team_name","match_id"]
 
-    # Normalize IDs and de-dupe to 1 row per (playerId, matchId)
-    minutes_df["playerId"] = minutes_df["playerId"].astype(str)
-    minutes_df["matchId"]  = minutes_df["matchId"].astype(str)
-    minutes_df = (
-        minutes_df
-        .groupby(["playerId", "matchId"], as_index=False)["minutesPlayed"]
-        .max()  # max minutes per match is typical
+    match_data_raw  = pd.read_sql(f"SELECT {', '.join(md_cols)} FROM match_data", conn)
+    player_data_raw = pd.read_sql(f"SELECT {', '.join(pd_cols)} FROM player_data", conn)
+    team_data_raw   = pd.read_sql(f"SELECT {', '.join(td_cols)} FROM team_data", conn)
+
+    # --- Normalize team_data column names ---
+    team_data_raw = team_data_raw.rename(columns={
+        "team_id": "teamId",
+        "team_name": "teamName",
+        "match_id": "matchId"
+    })
+
+    # ---------------------------
+    # 2) NORMALIZE DTYPES
+    # ---------------------------
+    def to_int64(df, cols):
+        for c in cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+
+    to_int64(player_data_raw, ["playerId","teamId","matchId"])
+    to_int64(match_data_raw,  ["matchId"])
+    to_int64(team_data_raw,   ["teamId","matchId"])
+
+    # Dates
+    if "startDate" in match_data_raw.columns:
+        match_data_raw["startDate"] = pd.to_datetime(match_data_raw["startDate"], errors="coerce")
+
+    # Competition lowercase
+    if "competition" in match_data_raw.columns:
+        match_data_raw["competition_l"] = match_data_raw["competition"].astype(str).str.lower()
+    COMPETITION_l = str(COMPETITION).lower()
+
+    # Normalize isFirstEleven
+    player_data_raw["isFirstEleven"] = (
+        player_data_raw["isFirstEleven"]
+        .replace({"True": 1, "False": 0, True: 1, False: 0})
     )
+    player_data_raw["isFirstEleven"] = pd.to_numeric(player_data_raw["isFirstEleven"], errors="coerce").fillna(0).astype(int)
 
-    # Coerce minutes to numeric
-    minutes_df["minutesPlayed"] = pd.to_numeric(
-        minutes_df["minutesPlayed"].astype(str).str.replace(",", ".", regex=False),
-        errors="coerce"
-    ).fillna(0)
+    # ---------------------------
+    # 3) COMPUTE MINUTES PLAYED (same helper as logged-in player)
+    # ---------------------------
+    from db_utils import prepare_player_data_with_minutes
 
-    # Align players_full IDs and merge minutes
-    players_full["playerId"] = players_full["playerId"].astype(str)
-    players_full["matchId"]  = players_full["matchId"].astype(str)
-    players_full = players_full.merge(
-        minutes_df,
-        on=["playerId", "matchId"],
+    player_data_raw = prepare_player_data_with_minutes(player_data_raw)
+
+    if "minutesPlayed" not in player_data_raw.columns:
+        st.error("❌ prepare_player_data_with_minutes() did not add 'minutesPlayed'. Check helper function.")
+
+    players_full = player_data_raw.merge(
+        match_data_raw[match_data_raw["competition_l"] == COMPETITION_l][["matchId", "startDate", "season"]],
+        on="matchId",
         how="left",
         validate="m:1"
     )
-    players_full["minutesPlayed"] = pd.to_numeric(players_full["minutesPlayed"], errors="coerce").fillna(0)
 
-    if players_full.empty:
-        st.warning("No players found for the selected filters.")
-        st.stop()
+    if selected_season:
+        players_full = players_full[players_full["season"] == selected_season]
 
-    # --- Ensure teamName is on players_full for UI labels
-    td_names = team_data_filtered[["teamId", "teamName"]].drop_duplicates().copy()
-    td_names["teamId"] = td_names["teamId"].astype(str)
-    players_full["teamId"] = players_full["teamId"].astype(str)
+    players_full = players_full[
+        players_full["startDate"].notna() &
+        (players_full["startDate"].dt.date >= start_date) &
+        (players_full["startDate"].dt.date <= end_date)
+    ].copy()
+
+    # Merge team names
+    td_names = team_data_raw[["teamId", "teamName"]].drop_duplicates(subset=["teamId"])
     players_full = players_full.merge(td_names, on="teamId", how="left")
 
-    # --- Build player selector BEFORE date filtering (ID-based, stable)
+    if players_full["startDate"].isna().all():
+        st.warning("⚠️ No startDate merged from match_data — check matchId alignment or competition filter.")
+
+    # ---------------------------
+    # 5) DEDUPE TO ONE ROW PER PLAYER-MATCH
+    # ---------------------------
+    players_full.groupby(["playerId","playerName","teamId","teamName","matchId","startDate"], as_index=False).agg(
+            age=("age","first"),
+            shirtNo=("shirtNo","first"),
+            height=("height","first"),
+            weight=("weight","first"),
+            isFirstEleven=("isFirstEleven","max"),
+            minutesPlayed=("minutesPlayed","max")
+        ).reset_index(drop=True)
+
+    players_full = players_full.sort_values(["playerId","startDate"]).reset_index(drop=True)
+
+    # ---------------------------
+    # 6) PLAYER PICKER
+    # ---------------------------
     player_index = (
-        players_full.groupby("playerId", as_index=False)
-        .agg(
-            playerName=("playerName", "first"),
-            teamName=("teamName", "first"),
-            minutes=("minutesPlayed", "sum")
-        )
+        players_full.groupby(["playerId","playerName","teamName"], as_index=False)
+        .agg(minutes=("minutesPlayed","sum"))
         .sort_values("minutes", ascending=False)
     )
 
     options_ids = player_index["playerId"].astype(str).tolist()
-
-    # Default: top by minutes, ensure logged-in player included
     logged_player_id = str(player_id)
-    logged_player_name = player_name
     default_ids = player_index.head(5)["playerId"].astype(str).tolist()
 
-    # ✅ VALIDAR que el logged player existe en options_ids antes de agregarlo
-    if logged_player_id in options_ids and logged_player_id not in default_ids:
+    if (logged_player_id in options_ids) and (logged_player_id not in default_ids):
         default_ids = ([logged_player_id] + [pid for pid in default_ids if pid != logged_player_id])[:5]
 
-    # Pretty labels
     label_map = {
-        str(row.playerId): (
-            f"{row.playerName} ({row.teamName})" if pd.notna(row.teamName) and row.teamName != "" else f"{row.playerName}"
-        )
-        for _, row in player_index.iterrows()
+        str(r.playerId): (f"{r.playerName} ({r.teamName})" if pd.notna(r.teamName) and r.teamName != "" else f"{r.playerName}")
+        for _, r in player_index.iterrows()
     }
 
     with st.expander("Filter Players by Position", expanded=False):
         selected_player_ids = st.multiselect(
             "Select players to compare",
             options=options_ids,
-            default=default_ids,  # ✅ Ahora solo contiene IDs que existen en options
+            default=default_ids,
             format_func=lambda pid: label_map.get(str(pid), str(pid))
         )
 
-    # Now filter selected players (ID-based)
     filtered_players = players_full[players_full["playerId"].astype(str).isin([str(x) for x in selected_player_ids])].copy()
-
-    # Date filter (season + sidebar date window)
-    filtered_players["startDate"] = pd.to_datetime(filtered_players["startDate"], errors="coerce")
-    filtered_players = filtered_players[
-        (filtered_players["startDate"] >= pd.to_datetime(start_date)) &
-        (filtered_players["startDate"] <= pd.to_datetime(end_date))
-    ].copy()
-
     if filtered_players.empty:
-        st.warning("No player/match rows left after date filtering.")
+        st.warning("No player/match rows left after filters.")
         st.stop()
 
-    # --- Group and aggregate player summary
+    # ---------------------------
+    # 7) SUMMARY (same as logged-in)
+    # ---------------------------
     summary_comparison_df = (
-        filtered_players.groupby(["playerId", "playerName", "teamId"], as_index=False)
-            .agg(
-                age=("age", "first"),
-                shirtNo=("shirtNo", "first"),
-                height=("height", "first"),
-                weight=("weight", "first"),
-                matches_played=("matchId", "nunique"),
-                games_as_starter=("isFirstEleven", "sum"),
-                total_minutes=("minutesPlayed", "sum"),
-            )
+        filtered_players.groupby(["playerId","playerName","teamId","teamName"], as_index=False)
+        .agg(
+            age=("age","first"),
+            shirtNo=("shirtNo","first"),
+            height=("height","first"),
+            weight=("weight","first"),
+            matches_played=("matchId","nunique"),
+            games_as_starter=("isFirstEleven","sum"),
+            total_minutes=("minutesPlayed","sum"),
+        )
     )
 
-    # Resolve teamName for the summary table
-    summary_comparison_df["teamId"] = summary_comparison_df["teamId"].astype(str)
-    summary_comparison_df = summary_comparison_df.merge(
-        td_names, on="teamId", how="left"
-    )
-
-    # --- Display table
     summary_display = summary_comparison_df.rename(columns={
-        "playerName": "Player",
-        "teamName": "Team",
-        "age": "Age",
-        "shirtNo": "Shirt No",
-        "height": "Height",
-        "weight": "Weight",
-        "matches_played": "Games Played",
-        "games_as_starter": "Games as Starter",
-        "total_minutes": "Minutes Played"
+        "playerName":"Player",
+        "teamName":"Team",
+        "age":"Age",
+        "shirtNo":"Shirt No",
+        "height":"Height",
+        "weight":"Weight",
+        "matches_played":"Games Played",
+        "games_as_starter":"Games as Starter",
+        "total_minutes":"Minutes Played"
     }).sort_values(by="Games Played", ascending=False)
 
     st.dataframe(
@@ -1648,23 +1752,12 @@ elif section == "Player Comparison":
         use_container_width=True
     )
 
-    # --- Ensure logged-in player's matches are present for KPI calc
-    logged_matches_full = players_full[players_full["playerId"].astype(str) == logged_player_id]
-    filtered_players = pd.concat([filtered_players, logged_matches_full]).drop_duplicates(
-        subset=["playerId", "matchId"]
-    ).reset_index(drop=True)
 
-    # Prepare IDs/placeholders for stats/events queries
-    player_ids = filtered_players["playerId"].astype(str).unique().tolist()
-    match_ids  = filtered_players["matchId"].astype(str).unique().tolist()
-
-    if not player_ids or not match_ids:
-        st.warning("No player/match data to compute KPIs for the selected season and filters.")
-        st.stop()
-
+    # --- Prepare IDs for SQL queries
+    player_ids = filtered_players["playerId"].unique().tolist()
+    match_ids = filtered_players["matchId"].unique().tolist()
     player_placeholders = ",".join(["%s"] * len(player_ids))
-    match_placeholders  = ",".join(["%s"] * len(match_ids))
-    
+    match_placeholders = ",".join(["%s"] * len(match_ids))
 
     # --- fetch stats & events
     query_stats = f"""
@@ -1692,6 +1785,7 @@ elif section == "Player Comparison":
         (metrics_summary["matchDate"] <= pd.to_datetime(end_date))
     ].copy()
     logged_player_id = str(player_id)
+    logged_player_name = player_name
     logged_player_metrics["playerId"] = logged_player_id
     logged_player_metrics["playerId"] = logged_player_metrics["playerId"].astype(str)
 
@@ -1736,6 +1830,7 @@ elif section == "Player Comparison":
     # ---- Ensure the logged-in player is present
     mask_logged = all_metrics_df["playerId"] == logged_player_id
     if not mask_logged.any():
+        pass
         # Add a zero row so the logged-in player appears in comparisons
         zero_row = {c: 0 for c in all_metrics_df.columns if c not in ("playerId","playerName","teamName")}
         zero_row.update({"playerId": logged_player_id, "playerName": logged_player_name})
@@ -1835,3 +1930,5 @@ elif section == "Player Comparison":
 
     st.expander("### Players Stats KPI Comparison")
     st.dataframe(summary_metrics_df, use_container_width=True)
+
+

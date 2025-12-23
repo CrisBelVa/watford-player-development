@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import os
 from PIL import Image
 from pathlib import Path
+import io
 
 
 # --- Configuración de página ---
@@ -609,7 +610,7 @@ elif page == "Players Profile":
     
     # Obtener actividades del jugador
     @st.cache_data(ttl=600)  # Cachear por 10 minutos
-    def load_player_activities(player_id):
+    def load_player_activities(player_id, start_date, end_date):
         try:
             # Cargar datos de entrenamiento
             df = load_training_data()
@@ -623,9 +624,9 @@ elif page == "Players Profile":
             if not jugador_nombre:
                 return pd.DataFrame()
             
-            # Convertir las fechas del sidebar a pandas datetime
-            fecha_inicio_dt = pd.to_datetime(fecha_inicio)
-            fecha_fin_dt = pd.to_datetime(fecha_fin)
+            # Convertir las fechas proporcionadas a pandas datetime
+            fecha_inicio_dt = pd.to_datetime(start_date)
+            fecha_fin_dt = pd.to_datetime(end_date)
             
             # Filtrar por jugador usando el filtro de fechas del sidebar
             actividades = df[
@@ -810,7 +811,7 @@ elif page == "Players Profile":
 
     # --- Load individual activities for selected player ---
     with st.spinner('Cargando datos del jugador...'):
-        df_actividades = load_player_activities(jugador_id)
+        df_actividades = load_player_activities(jugador_id, fecha_inicio, fecha_fin)
         
         jugador_info = next((v for k, v in jugadores.items() if k == jugador_id), "")
         
@@ -842,6 +843,20 @@ elif page == "Players Profile":
                         "subtipo": "Detalle",
                         "descripcion": "Descripción"
                     }
+                )
+
+                # Botón para exportar las actividades filtradas a Excel
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+                    df_mostrar.to_excel(writer, index=False, sheet_name="Actividades")
+
+                buffer.seek(0)
+
+                st.download_button(
+                    label="📥 Exportar a Excel",
+                    data=buffer,
+                    file_name=f"individual_activities_{jugador_info.replace(' ', '_')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
                 st.info("No hay actividades del tipo seleccionado.")
