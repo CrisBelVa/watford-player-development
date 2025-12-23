@@ -134,6 +134,7 @@ with st.expander("➕ Añadir jugador desde base de datos", expanded=False):
                 new_row = pd.DataFrame([{ "playerName": chosen["playerName"], "playerId": chosen["playerId"], "activo": 1 }])
                 players_df = pd.concat([players_df, new_row], ignore_index=True)
                 save_players_df(players_df, PLAYERS_FILE_XLSX)
+                load_players_df.clear()
                 st.success(f"Jugador '{chosen['playerName']}' añadido correctamente.")
                 st.rerun()
             else:
