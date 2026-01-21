@@ -1051,6 +1051,16 @@ if section == "Overview Stats":
     </div>
     """, unsafe_allow_html=True)
 
+
+    
+    # --- Merge team names into metrics_summary ---
+    teams_info = (
+        event_data.groupby("matchId")[["teamName", "oppositionTeamName"]]
+        .first()
+        .reset_index()
+    )
+    # ... etcs
+
     # --- Merge team names into metrics_summary ---
     teams_info = (
         event_data.groupby("matchId")[["teamName", "oppositionTeamName"]]
@@ -1210,6 +1220,311 @@ if section == "Overview Stats":
                 aggregated_metrics[key] = round(pd.to_numeric(filtered_df[key], errors="coerce").mean(), 1)
             else:
                 aggregated_metrics[key] = round(pd.to_numeric(filtered_df[key], errors="coerce").sum(), 2)
+    
+    # ========== BOTÓN PDF (DESPUÉS DE CALCULAR MÉTRICAS) ==========
+    st.markdown("---")  # Separador visual
+    
+    # ========== DEFINIR VARIABLES ADICIONALES SI NO EXISTEN ==========
+    # Calcular games_played, games_starter, minutes_played si no están definidas
+    try:
+        if 'games_played' not in locals():
+            games_played = filtered_df['matchId'].nunique() if 'matchId' in filtered_df.columns else 0
+    except:
+        games_played = 0
+    
+    try:
+        if 'games_starter' not in locals():
+            games_starter = int(filtered_df['isFirstEleven'].sum()) if 'isFirstEleven' in filtered_df.columns else 0
+    except:
+        games_starter = 0
+    
+    try:
+        if 'minutes_played' not in locals():
+            minutes_played = int(filtered_df['minutesPlayed'].sum()) if 'minutesPlayed' in filtered_df.columns else 0
+    except:
+        minutes_played = 0
+    
+    # ========== BOTÓN PARA GENERAR PDF REPORT ==========
+    
+    # Crear un contenedor único para el botón PDF
+    pdf_button_container = st.container()
+    
+    with pdf_button_container:
+        # Estilo SOLO para este botón específico
+        st.markdown("""
+            <style>
+            /* Estilo SOLO para botones primary (no afecta otros botones) */
+            div[data-testid="column"] button[kind="primary"] {
+                background-color: #fcec03 !important;
+                color: #000000 !important;
+                font-weight: bold !important;
+                border: 2px solid #000000 !important;
+                padding: 10px 24px !important;
+                font-size: 16px !important;
+                border-radius: 8px !important;
+            }
+            div[data-testid="column"] button[kind="primary"]:hover {
+                background-color: #e6d803 !important;
+                border-color: #fcec03 !important;
+                transform: scale(1.02) !important;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+        
+        # Botón con type="primary" para distinguirlo del botón LogOut
+        if st.button("📄 Generate PDF Report", type="primary", key="generate_pdf_button"):
+            try:
+                from utils.pdf_generator import generate_player_report
+                import plotly.express as px
+                from db_utils import (
+                    get_top5_players_by_position, 
+                    calculate_kpis_comparison,
+                    position_kpi_map
+                )
+                
+                # ===== 0. OBTENER KPIs AUTOMÁTICAMENTE =====
+                selected_kpis = position_kpi_map.get(player_position, [])
+                
+                if not selected_kpis:
+                    st.warning(f"⚠️ No se encontraron KPIs para la posición: {player_position}")
+                    selected_kpis = list(aggregated_metrics.keys())
+                
+                st.info(f"📊 KPIs seleccionados para {player_position}: {', '.join(selected_kpis)}")
+                
+                # ===== 1. PREPARAR PLAYER INFO =====
+                player_info_dict = {
+                    'age': age if age is not None else 'N/A',
+                    'shirtNo': shirt_number if shirt_number is not None else 'N/A',
+                    'height': height if height is not None else 'N/A',
+                    'weight': weight if weight is not None else 'N/A',
+                    'gamesPlayed': games_played,
+                    'gamesStarter': games_as_starter,  # ← TU VARIABLE CORRECTA
+                    'minutesPlayed': int(total_minutes)  # ← TU VARIABLE CORRECTA
+                }
+                
+                # ===== 2. PREPARAR FILTROS =====
+                if 'match_label' not in filtered_df.columns and 'matchDate' in filtered_df.columns and 'oppositionTeamName' in filtered_df.columns:
+                    filtered_df['match_label'] = filtered_df.apply(
+                        lambda x: f"{pd.to_datetime(x['matchDate']).strftime('%b %d')} - {x['oppositionTeamName']}", 
+                        axis=1
+                    )
+                
+                # Usar season_choice (tu variable correcta)
+                filters_dict = {
+                    'season': season_choice if season_choice != "All seasons" else None,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'selected_matches': filtered_df['match_label'].tolist()[:20]
+                }
+                
+                # ===== 3. PREPARAR TRENDS DATA =====
+                trends_data_list = []
+                trends_kpis = selected_kpis[:8]
+                
+                for kpi in trends_kpis:
+                    if kpi in filtered_df.columns:
+                        if 'opponent_label' not in filtered_df.columns:
+                            filtered_df['opponent_label'] = filtered_df.apply(
+                                lambda x: f"{pd.to_datetime(x['matchDate']).strftime('%b %d')}\n{x['oppositionTeamName'][:12]}", 
+                                axis=1
+                            )
+                        
+                        fig = px.bar(
+                            filtered_df, 
+                            x="opponent_label", 
+                            y=kpi,
+                            color_discrete_sequence=["#fcec03"],
+                            title=f"{kpi.replace('_', ' ').title()}"
+                        )
+                        
+                        season_avg = filtered_df[kpi].mean()
+                        fig.add_hline(
+                            y=season_avg, 
+                            line_dash="dash", 
+                            line_color="red",
+                            annotation_text=f"Avg: {season_avg:.2f}",
+                            annotation_position="right"
+                        )
+                        
+                        fig.update_layout(
+                            xaxis_title="Match",
+                            yaxis_title=kpi.replace('_', ' ').title(),
+                            showlegend=False,
+                            height=400
+                        )
+                        
+                        trends_data_list.append({
+                            'kpi_name': kpi.replace('_', ' ').title(),
+                            'fig': fig
+                        })
+                
+                # ===== 4. PREPARAR PLAYER COMPARISON =====
+                comparison_data_df = None
+                comparison_kpi_table_df = None
+                comparison_charts_list = []
+                
+                try:
+                    summary_df_top5, filtered_top5 = get_top5_players_by_position(
+                        start_date=start_date.strftime('%Y-%m-%d'),
+                        end_date=end_date.strftime('%Y-%m-%d'),
+                        position=player_position,
+                        player_stats=player_stats,
+                        player_data=player_data,
+                        match_data=match_data,
+                        team_data=team_data,
+                        event_data=event_data
+                    )
+                    
+                    if not summary_df_top5.empty:
+                        # TABLA 1: Players Summary
+                        comparison_data_df = summary_df_top5[[
+                            'playerName', 'teamName', 'age', 
+                            'matches_played', 'games_as_starter', 'total_minutes'
+                        ]].copy()
+                        
+                        comparison_data_df.columns = [
+                            'Player', 'Team', 'Age', 
+                            'Games Played', 'Games as Starter', 'Minutes Played'
+                        ]
+                        
+                        # TABLA 2: Players Stats KPI Comparison
+                        top5_player_ids = summary_df_top5['playerId'].tolist()
+                        ps_top5 = player_stats[player_stats['playerId'].isin(top5_player_ids)].copy()
+                        ev_top5 = event_data[event_data['playerId'].isin(top5_player_ids)].copy()
+                        
+                        from db_utils import process_player_comparison_metrics
+                        metrics_top5 = process_player_comparison_metrics(
+                            player_stats=ps_top5,
+                            event_data=ev_top5,
+                            player_position=player_position
+                        )
+                        
+                        if not metrics_top5.empty:
+                            sum_cols = [
+                                'passes_into_penalty_area', 'carries_into_final_third',
+                                'carries_into_penalty_area', 'goals', 'assists', 
+                                'xG', 'xA', 'ps_xG', 'passesKey', 'passesAccurate', 
+                                'passesTotal', 'aerialsWon', 'aerialsTotal',
+                                'dribblesWon', 'dribblesAttempted', 'shotsOnTarget', 
+                                'shotsTotal', 'recoveries', 'interceptions', 'clearances',
+                                'crosses', 'progressive_passes', 'totalSaves', 
+                                'claimsHigh', 'collected', 'def_actions_outside_box'
+                            ]
+                            
+                            mean_cols = [
+                                'pass_completion_pct', 'aerial_duel_pct', 
+                                'take_on_success_pct', 'shots_on_target_pct',
+                                'long_pass_pct', 'save_pct'
+                            ]
+                            
+                            agg_dict = {}
+                            for col in sum_cols:
+                                if col in metrics_top5.columns:
+                                    agg_dict[col] = 'sum'
+                            for col in mean_cols:
+                                if col in metrics_top5.columns:
+                                    agg_dict[col] = 'mean'
+                            
+                            metrics_agg = metrics_top5.merge(
+                                summary_df_top5[['playerId', 'playerName', 'teamName', 'matches_played']],
+                                on='playerId',
+                                how='left'
+                            )
+                            
+                            metrics_agg = metrics_agg.groupby(['playerId', 'playerName', 'teamName', 'matches_played'], as_index=False).agg(agg_dict)
+                            
+                            comparison_kpi_table_df = calculate_kpis_comparison(metrics_agg)
+                            
+                            available_kpi_cols = [col for col in selected_kpis if col in comparison_kpi_table_df.columns]
+                            
+                            comparison_kpi_table_df = comparison_kpi_table_df[
+                                ['playerId', 'playerName', 'teamName'] + available_kpi_cols
+                            ]
+                        
+                        # GRÁFICOS COMPARATIVOS
+                        if comparison_kpi_table_df is not None and not comparison_kpi_table_df.empty:
+                            chart_kpis = available_kpi_cols[:6]
+                            
+                            for kpi in chart_kpis:
+                                chart_data = comparison_kpi_table_df.sort_values(kpi, ascending=False)
+                                
+                                fig = px.bar(
+                                    chart_data,
+                                    x='playerName',
+                                    y=kpi,
+                                    color='teamName',
+                                    color_discrete_sequence=px.colors.qualitative.Set2,
+                                    title=f"{kpi.replace('_', ' ').title()} - Top 5 Players"
+                                )
+                                
+                                colors = []
+                                for name in chart_data['playerName']:
+                                    if name == player_name:
+                                        colors.append('#fcec03')
+                                    else:
+                                        colors.append('#cccccc')
+                                
+                                fig.update_traces(marker_color=colors)
+                                
+                                fig.update_layout(
+                                    xaxis_title="Player",
+                                    yaxis_title=kpi.replace('_', ' ').title(),
+                                    showlegend=False,
+                                    height=400
+                                )
+                                
+                                comparison_charts_list.append({
+                                    'kpi_name': kpi.replace('_', ' ').title(),
+                                    'fig': fig
+                                })
+                
+                except Exception as comp_error:
+                    st.warning(f"⚠️ Player Comparison no disponible: {comp_error}")
+                    comparison_data_df = None
+                    comparison_kpi_table_df = None
+                    comparison_charts_list = []
+                
+                # ===== 5. GENERAR PDF =====
+                logo_path = "img/watford_logo.png"
+                
+                pdf_bytes = generate_player_report(
+                    player_name=player_name,
+                    player_info=player_info_dict,
+                    player_position=player_position,
+                    aggregated_metrics=aggregated_metrics,
+                    filtered_df=filtered_df,
+                    filters_data=filters_dict,
+                    logo_path=logo_path,
+                    calculate_delta_func=calculate_delta,
+                    position_kpi_map=position_kpi_map,
+                    trends_data=trends_data_list,
+                    comparison_data=comparison_data_df,
+                    comparison_kpi_table=comparison_kpi_table_df,
+                    comparison_charts=comparison_charts_list
+                )
+                
+                # ===== 6. BOTÓN DE DESCARGA =====
+                st.download_button(
+                    label="📥 Download PDF Report",
+                    data=pdf_bytes,
+                    file_name=f"{player_name.replace(' ', '_')}_Report.pdf",
+                    mime="application/pdf"
+                )
+                
+                st.success("✅ PDF Report generated successfully!")
+                
+            except Exception as e:
+                st.error(f"Error generating PDF: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+    
+    st.markdown("---")  # Separador
+    
+    # --- Scorecards (4 per row) ---  ← Aquí continúa el código original
+    metrics_per_row = 4
+    metric_chunks = [metric_keys[i:i + metrics_per_row] for i in range(0, len(metric_keys), metrics_per_row)]
+
+
 
     # --- Scorecards (4 per row) ---
     metrics_per_row = 4
