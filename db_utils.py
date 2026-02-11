@@ -1763,7 +1763,7 @@ def plot_kpi_comparison(combined_metrics_df, metric_keys, metric_labels, player_
 
 def process_player_comparison_metrics(player_stats: pd.DataFrame,
                                       event_data: pd.DataFrame,
-                                      player_position: str | None = None) -> pd.DataFrame:
+                                      player_position: Optional[str] = None) -> pd.DataFrame:
     """
     Vectorized version of process_player_metrics for many players.
     - Cleans & casts like your player function
