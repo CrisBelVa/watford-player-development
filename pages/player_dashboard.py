@@ -18,6 +18,7 @@ from typing import Tuple, Dict, Any
 from sqlalchemy import create_engine
 from pandas.io.formats.style import Styler
 import streamlit.components.v1 as components  # ✅ needed for working HTML injection
+from player_ids import normalize_whoscored_player_id, whoscored_player_url
 
 # Optional: helper to navigate between pages
 try:
@@ -30,6 +31,7 @@ except ModuleNotFoundError:
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG_DIR = os.path.join(BASE_DIR, 'img')
 LOGO_PATH = os.path.join(IMG_DIR, 'watford_logo.png')
+BACKGROUND_COVER_PATH = os.path.join(IMG_DIR, "Watford_portada_d.jpg")
 
 st.set_page_config(
     page_title="Watford Player Development Hub",
@@ -37,6 +39,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+
+def _safe_pdf_filename(name: str) -> str:
+    sanitized = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(name or "").strip())
+    sanitized = sanitized.strip("_")
+    return sanitized or "player_report"
 
 # === AUTHENTICATION CHECK ===
 if "logged_in" not in st.session_state or not st.session_state.logged_in:
@@ -153,14 +161,22 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
         base_xlsx = os.path.join('data', 'watford_players_login_info.xlsx')
 
         if os.path.exists(base_csv):
-            players_df = pd.read_csv(base_csv, dtype={"playerId": "string"})
+            players_df = pd.read_csv(base_csv, dtype={"internal_id": "string", "playerId": "string"})
         elif os.path.exists(base_xlsx):
-            players_df = pd.read_excel(base_xlsx, converters={"playerId": lambda x: str(x).strip() if pd.notna(x) else None})
+            players_df = pd.read_excel(
+                base_xlsx,
+                converters={
+                    "internal_id": lambda x: str(x).strip() if pd.notna(x) else None,
+                    "playerId": lambda x: str(x).strip() if pd.notna(x) else None,
+                },
+            )
         else:
             st.warning("No players file found. Upload CSV/XLSX with columns: playerId, playerName, activo.")
             return {}
 
         players_df.columns = [str(c).strip() for c in players_df.columns]
+        if "internal_id" not in players_df.columns:
+            players_df["internal_id"] = None
 
         if 'playerName' not in players_df.columns:
             st.error("❌ Column 'playerName' is required in the players file.")
@@ -176,6 +192,8 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
             players_df['playerId'] = players_df['playerId'].astype('string')
             players_df['playerId'] = players_df['playerId'].where(players_df['playerId'].notna(), None)
             players_df['playerId'] = players_df['playerId'].apply(lambda x: x.strip() if isinstance(x, str) else x)
+            players_df["playerId"] = players_df["playerId"].apply(normalize_whoscored_player_id)
+            players_df["playerId"] = players_df["playerId"].astype("string").where(players_df["playerId"].notna(), None)
         else:
             st.warning("⚠️ Column 'playerId' not found. Some features may fail.")
 
@@ -185,12 +203,18 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
             if not full_name:
                 continue
             pid = row.get('playerId', None) if has_id else None
+            internal_id = str(row.get("internal_id", "")).strip()
             activo = int(row.get('activo', 1))
-            label = f"{full_name}{'' if activo == 1 else ' (Inactive)'}"
+            id_suffix = f" [{internal_id}]" if internal_id else ""
+            label = f"{full_name}{id_suffix}{'' if activo == 1 else ' (Inactive)'}"
             # Handle pandas NA values properly
             if pd.isna(pid) or pid in (None, "", "nan"):
                 pid = None
+            else:
+                pid_str = str(pid).strip()
+                pid = pid_str if pid_str.isdigit() else None
             players[label] = {
+                "internal_id": internal_id or None,
                 "playerId": pid,
                 "playerName": full_name,
                 "activo": activo,
@@ -264,9 +288,14 @@ def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
         sel = filtered[selected]
         pid = sel.get("playerId")
         pname = sel.get("playerName", "")
+        internal_id = sel.get("internal_id")
 
         if pid is None or str(pid).strip() == "":
-            st.error("Selected player has no 'playerId'. Add a 'playerId' column to your players file.")
+            extra = f" (internal_id: {internal_id})" if internal_id else ""
+            st.error(
+                "Selected player has no WhoScored 'playerId'. "
+                f"Assign one in Manage Players to open match-based dashboard data{extra}."
+            )
             st.stop()
 
         # Always return strings
@@ -370,6 +399,9 @@ inject_sidebar_logo()
 
 # Page title
 st.title(f"{player_name}")
+whoscored_url = whoscored_player_url(player_id)
+if whoscored_url:
+    st.markdown(f"[WhoScored]({whoscored_url})")
 
 # --- Load Data ---
 
@@ -1123,43 +1155,59 @@ if section == "Overview Stats":
             .drop_duplicates()
             .sort_values("matchDate")
         )
+        all_match_ids = list(match_options["matchId"])
+        state_key = "selected_match_ids_kpi"
 
         # Search box
-        search_text = st.text_input("🔍 Search match:", "")
-
+        search_text = st.text_input("🔍 Search match:", "", key="match_search_kpi")
         filtered_options = match_options[
             match_options["match_label"].str.contains(search_text, case=False, na=False)
-        ]
+        ].copy()
+        visible_match_ids = list(filtered_options["matchId"])
+
+        # Initialize and normalize selected IDs in session state
+        if state_key not in st.session_state:
+            st.session_state[state_key] = all_match_ids
+        else:
+            st.session_state[state_key] = [mid for mid in st.session_state[state_key] if mid in all_match_ids]
 
         # Select all / clear buttons
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("Select All Matches"):
-                st.session_state.selected_match_ids = list(filtered_options["matchId"])
+            if st.button("Select All Matches", key="select_all_matches_kpi"):
+                st.session_state[state_key] = all_match_ids
+                for mid in all_match_ids:
+                    st.session_state[f"match_kpi_{mid}"] = True
         with col2:
-            if st.button("Clear Matches"):
-                st.session_state.selected_match_ids = []
+            if st.button("Clear Matches", key="clear_matches_kpi"):
+                st.session_state[state_key] = []
+                for mid in all_match_ids:
+                    st.session_state[f"match_kpi_{mid}"] = False
 
-        # Maintain session state (default = all currently visible)
-        default_ids = list(filtered_options["matchId"])
-        selected_ids = st.session_state.get("selected_match_ids", default_ids)
-        selected_match_ids = []
+        selected_ids = set(st.session_state[state_key])
+        selected_visible_ids = []
+        visible_set = set(visible_match_ids)
 
-        # Scrollable checkbox list
         st.markdown("<div style='max-height: 250px; overflow-y: auto; padding: 0 10px;'>", unsafe_allow_html=True)
         for _, row in filtered_options.iterrows():
-            checked = row["matchId"] in selected_ids
-            checkbox = st.checkbox(row["match_label"], value=checked, key=f"match_{row['matchId']}")
-            if checkbox:
-                selected_match_ids.append(row["matchId"])
+            mid = row["matchId"]
+            label = row["match_label"]
+            cb_key = f"match_kpi_{mid}"
+            if cb_key not in st.session_state:
+                st.session_state[cb_key] = mid in selected_ids
+            checked = st.checkbox(label, key=cb_key)
+            if checked:
+                selected_visible_ids.append(mid)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.session_state.selected_match_ids = selected_match_ids
+        hidden_selected = [mid for mid in st.session_state[state_key] if mid not in visible_set]
+        updated_set = set(hidden_selected) | set(selected_visible_ids)
+        st.session_state[state_key] = [mid for mid in all_match_ids if mid in updated_set]
 
     st.caption(f"Showing Metrics for position: **{player_position}**")
 
     # Apply match filter (guard empty state)
-    current_selected = st.session_state.get("selected_match_ids", [])
+    current_selected = st.session_state.get("selected_match_ids_kpi", [])
     if current_selected:
         filtered_df = filtered_df[filtered_df["matchId"].isin(current_selected)]
     else:
@@ -1221,6 +1269,96 @@ if section == "Overview Stats":
             label = metric_labels.get(key, key.replace("_", " ").title())
             value = aggregated_metrics.get(key, "N/A")
             display_metric_card(cols[i], label, value, filtered_df, metrics_summary, key, color="#fcec03")
+
+    with st.expander("Export PDF Report", expanded=False):
+        season_value = st.session_state.get("selected_season") or "All seasons"
+        selected_match_map = dict(zip(match_options["matchId"], match_options["match_label"]))
+        selected_match_labels = [selected_match_map.get(mid, str(mid)) for mid in current_selected]
+
+        report_signature = (
+            f"{player_id}|{player_name}|{season_value}|{start_date}|{end_date}|"
+            f"{','.join(str(mid) for mid in current_selected)}"
+        )
+        if st.session_state.get("player_report_pdf_signature") != report_signature:
+            st.session_state["player_report_pdf_signature"] = report_signature
+            st.session_state.pop("player_report_pdf_bytes", None)
+            st.session_state.pop("player_report_pdf_name", None)
+
+        if st.button("Generate PDF report", key="generate_player_report_pdf", type="primary"):
+            try:
+                from utils.pdf_generator import generate_player_report
+            except ModuleNotFoundError:
+                st.error("Missing dependency for PDF generation. Install `fpdf2` and restart the app.")
+            except Exception as e:
+                st.error(f"Could not load PDF generator: {e}")
+            else:
+                try:
+                    games_played_pdf = int(filtered_df["matchId"].nunique()) if "matchId" in filtered_df.columns else int(games_played)
+                    if "isFirstEleven" in filtered_df.columns:
+                        games_starter_pdf = int(pd.to_numeric(filtered_df["isFirstEleven"], errors="coerce").fillna(0).sum())
+                    else:
+                        games_starter_pdf = int(games_as_starter)
+                    if "minutesPlayed" in filtered_df.columns:
+                        minutes_pdf = float(pd.to_numeric(filtered_df["minutesPlayed"], errors="coerce").fillna(0).sum())
+                    else:
+                        minutes_pdf = float(total_minutes)
+
+                    player_info_payload = {
+                        "age": age if pd.notna(age) else "N/A",
+                        "shirtNo": shirt_number if pd.notna(shirt_number) else "N/A",
+                        "height": height if pd.notna(height) else "N/A",
+                        "weight": weight if pd.notna(weight) else "N/A",
+                        "gamesPlayed": games_played_pdf,
+                        "gamesStarter": games_starter_pdf,
+                        "minutesPlayed": minutes_pdf,
+                    }
+
+                    filters_data = {
+                        "season": season_value,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "selected_matches": selected_match_labels,
+                    }
+
+                    safe_name = _safe_pdf_filename(player_name)
+                    file_name = f"{safe_name}_player_report.pdf"
+
+                    with st.spinner("Generating PDF report..."):
+                        pdf_bytes = generate_player_report(
+                            player_name=player_name,
+                            player_info=player_info_payload,
+                            player_position=player_position,
+                            aggregated_metrics=aggregated_metrics,
+                            filtered_df=filtered_df,
+                            filters_data=filters_data,
+                            logo_path=LOGO_PATH,
+                            calculate_delta_func=calculate_delta,
+                            full_df=metrics_summary,
+                            position_kpi_map=position_kpi_map,
+                            trends_data=None,
+                            comparison_data=None,
+                            comparison_kpi_table=None,
+                            comparison_charts=None,
+                            background_image_path=BACKGROUND_COVER_PATH if os.path.exists(BACKGROUND_COVER_PATH) else None,
+                        )
+
+                    if not pdf_bytes:
+                        raise ValueError("Generated PDF is empty.")
+
+                    st.session_state["player_report_pdf_bytes"] = pdf_bytes
+                    st.session_state["player_report_pdf_name"] = file_name
+                    st.success("PDF generated. Download it below.")
+                except Exception as e:
+                    st.error(f"Failed to generate PDF: {e}")
+
+        if st.session_state.get("player_report_pdf_bytes"):
+            st.download_button(
+                "Download PDF report",
+                data=st.session_state["player_report_pdf_bytes"],
+                file_name=st.session_state.get("player_report_pdf_name", "player_report.pdf"),
+                mime="application/pdf",
+                key="download_player_report_pdf",
+            )
 
     # --- Full Stats Table ---
     display_df = filtered_df.copy()
@@ -1290,34 +1428,54 @@ elif section == "Trends Stats":
     # --- Match Filter ---
     with st.expander("Filter by Match (click to hide)", expanded=True):
         match_options = trends_df[["matchId", "opponent_label", "matchDate"]].drop_duplicates().sort_values("matchDate")
-        match_labels_dict = dict(zip(match_options["matchId"], match_options["opponent_label"]))
+        all_match_ids = list(match_options["matchId"])
+        state_key = "selected_match_ids_trends"
 
-        search_text = st.text_input("🔍 Search match:", "")
-        filtered_options = match_options[match_options["opponent_label"].str.contains(search_text, case=False, na=False)]
+        search_text = st.text_input("🔍 Search match:", "", key="match_search_trends")
+        filtered_options = match_options[
+            match_options["opponent_label"].str.contains(search_text, case=False, na=False)
+        ].copy()
+        visible_match_ids = list(filtered_options["matchId"])
+
+        if state_key not in st.session_state:
+            st.session_state[state_key] = all_match_ids
+        else:
+            st.session_state[state_key] = [mid for mid in st.session_state[state_key] if mid in all_match_ids]
 
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("Select All Matches"):
-                st.session_state.selected_match_ids = list(filtered_options["matchId"])
+            if st.button("Select All Matches", key="select_all_matches_trends"):
+                st.session_state[state_key] = all_match_ids
+                for mid in all_match_ids:
+                    st.session_state[f"trends_match_{mid}"] = True
         with col2:
-            if st.button("Clear Matches"):
-                st.session_state.selected_match_ids = []
+            if st.button("Clear Matches", key="clear_matches_trends"):
+                st.session_state[state_key] = []
+                for mid in all_match_ids:
+                    st.session_state[f"trends_match_{mid}"] = False
 
-        selected_ids = st.session_state.get("selected_match_ids", list(filtered_options["matchId"]))
-        selected_match_ids = []
+        selected_ids = set(st.session_state[state_key])
+        selected_visible_ids = []
+        visible_set = set(visible_match_ids)
 
         st.markdown("<div style='max-height: 250px; overflow-y: auto; padding: 0 10px;'>", unsafe_allow_html=True)
         for _, row in filtered_options.iterrows():
-            checked = row["matchId"] in selected_ids
-            checkbox = st.checkbox(row["opponent_label"], value=checked, key=f"trends_match_{row['matchId']}")
-            if checkbox:
-                selected_match_ids.append(row["matchId"])
+            mid = row["matchId"]
+            label = row["opponent_label"]
+            cb_key = f"trends_match_{mid}"
+            if cb_key not in st.session_state:
+                st.session_state[cb_key] = mid in selected_ids
+            checked = st.checkbox(label, key=cb_key)
+            if checked:
+                selected_visible_ids.append(mid)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.session_state.selected_match_ids = selected_match_ids
+        hidden_selected = [mid for mid in st.session_state[state_key] if mid not in visible_set]
+        updated_set = set(hidden_selected) | set(selected_visible_ids)
+        st.session_state[state_key] = [mid for mid in all_match_ids if mid in updated_set]
 
     # Apply match filter (but don't re-create opponent_label!)
-    trends_df = trends_df[trends_df["matchId"].isin(st.session_state.selected_match_ids)]
+    trends_df = trends_df[trends_df["matchId"].isin(st.session_state.get("selected_match_ids_trends", []))]
 
     # --- Now Plot ---
     for key in metric_keys:
@@ -1930,5 +2088,3 @@ elif section == "Player Comparison":
 
     st.expander("### Players Stats KPI Comparison")
     st.dataframe(summary_metrics_df, use_container_width=True)
-
-

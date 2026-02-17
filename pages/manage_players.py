@@ -1,5 +1,6 @@
 import os
 import re
+import html
 import base64
 import mimetypes
 import streamlit as st
@@ -7,6 +8,7 @@ import pandas as pd
 from pathlib import Path
 from io import BytesIO
 from db_utils import connect_to_db
+from player_ids import normalize_whoscored_player_id, whoscored_player_url
 from PIL import Image, ImageOps
 from typing import Optional
 # --- Config --------------------------------------------------
@@ -14,6 +16,11 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG_DIR = os.path.join(BASE_DIR, "img")
 LOGO_PATH = os.path.join(IMG_DIR, "watford_logo.png")
 PLAYER_PHOTOS_DIR = os.path.join(BASE_DIR, "data", "player_photos")
+INTERNAL_ID_COL = "internal_id"
+INTERNAL_ID_PREFIX = "INT"
+INTERNAL_ID_PAD = 5
+INTERNAL_POSITION_COL = "internal_position"
+AUTO_POSITION_LABEL = "Auto (WhoScored)"
 
 POSITION_CODE_TO_LABEL = {
     "GK": "Goalkeeper",
@@ -43,6 +50,7 @@ POSITION_ORDER = [
     "Striker",
     "Unknown",
 ]
+INTERNAL_POSITION_OPTIONS = [AUTO_POSITION_LABEL] + POSITION_ORDER.copy()
 
 st.set_page_config(
     page_title="Gestionar lista de jugadores",
@@ -66,49 +74,87 @@ PLAYERS_FILE_XLSX = os.path.join(BASE_DIR, "data", "watford_players_login_info.x
 @st.cache_data(show_spinner=False)
 def load_players_df(path: str) -> pd.DataFrame:
     """Load players Excel into a DataFrame. If the file doesn't exist create an empty df.
-    Ensures the columns: playerName (str), playerId (string), activo (int), photo_url (string).
+    Ensures the columns: internal_id (str), playerName (str), playerId (string),
+    internal_position (str), activo (int), photo_url (string).
     """
     if not os.path.exists(path):
-        return pd.DataFrame(columns=["playerName", "playerId", "activo", "photo_url"])
+        return pd.DataFrame(
+            columns=[INTERNAL_ID_COL, "playerName", "playerId", INTERNAL_POSITION_COL, "activo", "photo_url"]
+        )
     # Keep playerId as string to preserve format
-    df = pd.read_excel(path, converters={"playerId": lambda x: str(x).strip() if pd.notna(x) else None})
+    df = pd.read_excel(
+        path,
+        converters={
+            "playerId": lambda x: str(x).strip() if pd.notna(x) else None,
+            INTERNAL_ID_COL: lambda x: str(x).strip() if pd.notna(x) else None,
+            INTERNAL_POSITION_COL: lambda x: str(x).strip() if pd.notna(x) else None,
+        },
+    )
     # Normalize columns
     df.columns = [str(c).strip() for c in df.columns]
+    if INTERNAL_ID_COL not in df.columns:
+        df[INTERNAL_ID_COL] = None
     if "playerName" not in df.columns:
         df["playerName"] = ""
     if "playerId" not in df.columns:
         df["playerId"] = None
+    if INTERNAL_POSITION_COL not in df.columns:
+        df[INTERNAL_POSITION_COL] = None
     if "activo" not in df.columns:
         df["activo"] = 1
     if "photo_url" not in df.columns:
         df["photo_url"] = None
     # Coerce types
+    df[INTERNAL_ID_COL] = df[INTERNAL_ID_COL].astype("string").where(df[INTERNAL_ID_COL].notna(), None)
+    df[INTERNAL_ID_COL] = df[INTERNAL_ID_COL].apply(lambda x: x.strip() if isinstance(x, str) else x)
     df["playerName"] = df["playerName"].astype(str).str.strip()
     df["playerId"] = df["playerId"].astype("string").where(df["playerId"].notna(), None)
+    df["playerId"] = df["playerId"].apply(lambda x: x.strip() if isinstance(x, str) else x)
+    df["playerId"] = df["playerId"].apply(normalize_whoscored_player_id)
+    df["playerId"] = df["playerId"].astype("string").where(df["playerId"].notna(), None)
+    df[INTERNAL_POSITION_COL] = df[INTERNAL_POSITION_COL].astype("string").where(df[INTERNAL_POSITION_COL].notna(), None)
+    df[INTERNAL_POSITION_COL] = df[INTERNAL_POSITION_COL].apply(_normalize_internal_position)
     df["activo"] = pd.to_numeric(df["activo"], errors="coerce").fillna(1).astype(int).clip(0, 1)
     df["photo_url"] = df["photo_url"].astype("string").where(df["photo_url"].notna(), None)
     df["photo_url"] = df["photo_url"].apply(lambda x: x.strip() if isinstance(x, str) else x)
-    return df[["playerName", "playerId", "activo", "photo_url"]]
+    df = _ensure_internal_ids(df)
+    return df[[INTERNAL_ID_COL, "playerName", "playerId", INTERNAL_POSITION_COL, "activo", "photo_url"]]
 
 
 def save_players_df(df: pd.DataFrame, path: str):
     """Save dataframe back to Excel safely."""
+    df = df.copy()
     # Ensure directory exists
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    df = _ensure_internal_ids(df)
     # Ensure 'activo' column is int and only contains 0/1
     if "activo" in df.columns:
         df["activo"] = pd.to_numeric(df["activo"], errors="coerce").fillna(1).astype(int).clip(0, 1)
     # Normalize order and whitespace
+    if INTERNAL_ID_COL in df.columns:
+        df[INTERNAL_ID_COL] = df[INTERNAL_ID_COL].astype("string").where(df[INTERNAL_ID_COL].notna(), None)
+        df[INTERNAL_ID_COL] = df[INTERNAL_ID_COL].apply(lambda x: x.strip() if isinstance(x, str) else x)
+    else:
+        df[INTERNAL_ID_COL] = None
     df["playerName"] = df["playerName"].astype(str).str.strip()
     if "playerId" in df.columns:
         df["playerId"] = df["playerId"].astype("string")
         df["playerId"] = df["playerId"].where(df["playerId"].notna(), None)
         df["playerId"] = df["playerId"].apply(lambda x: x.strip() if isinstance(x, str) else x)
+        df["playerId"] = df["playerId"].apply(normalize_whoscored_player_id)
+        df["playerId"] = df["playerId"].astype("string").where(df["playerId"].notna(), None)
+    else:
+        df["playerId"] = None
+    if INTERNAL_POSITION_COL in df.columns:
+        df[INTERNAL_POSITION_COL] = df[INTERNAL_POSITION_COL].astype("string").where(df[INTERNAL_POSITION_COL].notna(), None)
+        df[INTERNAL_POSITION_COL] = df[INTERNAL_POSITION_COL].apply(_normalize_internal_position)
+    else:
+        df[INTERNAL_POSITION_COL] = None
     if "photo_url" not in df.columns:
         df["photo_url"] = None
     df["photo_url"] = df["photo_url"].astype("string").where(df["photo_url"].notna(), None)
     df["photo_url"] = df["photo_url"].apply(lambda x: x.strip() if isinstance(x, str) else x)
-    df = df[["playerName", "playerId", "activo", "photo_url"]]
+    df = df[[INTERNAL_ID_COL, "playerName", "playerId", INTERNAL_POSITION_COL, "activo", "photo_url"]]
     with BytesIO() as buffer:
         df.to_excel(buffer, index=False)
         buffer.seek(0)
@@ -132,6 +178,121 @@ def _clean_str(value: object) -> str:
     if s.lower() in {"nan", "none", "<na>"}:
         return ""
     return s
+
+def _normalize_internal_position(value: object) -> Optional[str]:
+    s = _clean_str(value)
+    if not s or s == AUTO_POSITION_LABEL:
+        return None
+    return s
+
+def _active_status_badge_html(is_active: bool) -> str:
+    if is_active:
+        bg = "#dcfce7"
+        fg = "#166534"
+        label = "Activo"
+    else:
+        bg = "#fee2e2"
+        fg = "#991b1b"
+        label = "Inactivo"
+    return (
+        f"<span style='display:inline-block;padding:0.15rem 0.5rem;border-radius:999px;"
+        f"background:{bg};color:{fg};font-weight:700;font-size:0.78rem'>{label}</span>"
+    )
+
+def _player_card_title_html(player_name: str, position_label: str) -> str:
+    name = html.escape(_clean_str(player_name))
+    pos = html.escape(_clean_str(position_label) or "Unknown")
+    return (
+        "<div style='margin-top:0.35rem;margin-bottom:0.35rem;"
+        "background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:0.5rem 0.65rem;'>"
+        f"<div style='font-weight:800;font-size:0.95rem;color:#0f172a;line-height:1.2'>{name}</div>"
+        f"<div style='font-weight:600;font-size:0.82rem;color:#475569;margin-top:0.15rem'>{pos}</div>"
+        "</div>"
+    )
+
+def _player_photo_block_html(photo_src: Optional[str]) -> str:
+    if photo_src:
+        src = html.escape(photo_src, quote=True)
+        return (
+            "<div style='width:100%;height:320px;border-radius:12px;overflow:hidden;"
+            "background:#e5e7eb;margin-bottom:0.35rem;'>"
+            f"<img src='{src}' style='width:100%;height:100%;object-fit:cover;object-position:center top;display:block;'/>"
+            "</div>"
+        )
+    return (
+        "<div style='width:100%;height:320px;border-radius:12px;overflow:hidden;"
+        "background:linear-gradient(180deg,#f1f5f9 0%,#e2e8f0 100%);margin-bottom:0.35rem;"
+        "display:flex;align-items:center;justify-content:center;color:#64748b;font-weight:700;'>"
+        "Sin foto"
+        "</div>"
+    )
+
+def _normalize_internal_id(value: object) -> Optional[str]:
+    s = _clean_str(value)
+    if not s:
+        return None
+    candidate = s.upper().replace("_", "-")
+    match = re.match(rf"^{INTERNAL_ID_PREFIX}-?(\d+)$", candidate)
+    if not match:
+        return s
+    return f"{INTERNAL_ID_PREFIX}-{int(match.group(1)):0{INTERNAL_ID_PAD}d}"
+
+def _parse_internal_seq(value: object) -> int:
+    s = _clean_str(value).upper()
+    match = re.match(rf"^{INTERNAL_ID_PREFIX}-(\d+)$", s)
+    return int(match.group(1)) if match else 0
+
+def _next_internal_id(df: pd.DataFrame) -> str:
+    used = set()
+    max_seq = 0
+    if INTERNAL_ID_COL in df.columns:
+        for raw in df[INTERNAL_ID_COL].tolist():
+            norm = _normalize_internal_id(raw)
+            if not norm:
+                continue
+            used.add(norm)
+            max_seq = max(max_seq, _parse_internal_seq(norm))
+    seq = max_seq + 1
+    while True:
+        candidate = f"{INTERNAL_ID_PREFIX}-{seq:0{INTERNAL_ID_PAD}d}"
+        if candidate not in used:
+            return candidate
+        seq += 1
+
+def _ensure_internal_ids(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if INTERNAL_ID_COL not in out.columns:
+        out[INTERNAL_ID_COL] = None
+
+    normalized = [_normalize_internal_id(v) for v in out[INTERNAL_ID_COL].tolist()]
+    out[INTERNAL_ID_COL] = normalized
+
+    max_seq = 0
+    for val in normalized:
+        max_seq = max(max_seq, _parse_internal_seq(val))
+
+    seen = set()
+    seq = max_seq + 1
+
+    for idx in out.index:
+        val = _normalize_internal_id(out.at[idx, INTERNAL_ID_COL])
+        if val and val not in seen:
+            out.at[idx, INTERNAL_ID_COL] = val
+            seen.add(val)
+            continue
+
+        while True:
+            candidate = f"{INTERNAL_ID_PREFIX}-{seq:0{INTERNAL_ID_PAD}d}"
+            seq += 1
+            if candidate not in seen:
+                out.at[idx, INTERNAL_ID_COL] = candidate
+                seen.add(candidate)
+                break
+
+    return out
+
+def _whoscored_player_url(player_id: object) -> Optional[str]:
+    return whoscored_player_url(player_id)
 
 def _photo_src_to_abs_path(photo_src: str) -> Path:
     p = Path(_clean_str(photo_src))
@@ -164,12 +325,18 @@ def _build_photo_preview(photo_src: Optional[str]) -> Optional[str]:
         return None
     return _local_image_to_data_url(str(abs_path), abs_path.stat().st_mtime)
 
-def _save_uploaded_photo(uploaded_file, player_id: str, player_name: Optional[str] = None) -> str:
+def _save_uploaded_photo(
+    uploaded_file,
+    player_id: str,
+    player_name: Optional[str] = None,
+    internal_id: Optional[str] = None,
+) -> str:
     """Save uploaded photo to data/player_photos and return a relative path to store in Excel."""
     os.makedirs(PLAYER_PHOTOS_DIR, exist_ok=True)
 
     pid = (player_id or "").strip()
-    base = _safe_slug(pid) if pid else _safe_slug(player_name or "player")
+    iid = (internal_id or "").strip()
+    base = _safe_slug(pid) if pid else (_safe_slug(iid) if iid else _safe_slug(player_name or "player"))
     filename = f"{base}.jpg"
     rel_path = os.path.join("data", "player_photos", filename)
     abs_path = os.path.join(BASE_DIR, rel_path)
@@ -195,21 +362,34 @@ def _save_uploaded_photo(uploaded_file, player_id: str, player_name: Optional[st
     img.save(abs_path, format="JPEG", quality=85, optimize=True, progressive=True)
     return rel_path
 
-def _update_player_row(players_excel_df: pd.DataFrame, player_id: str, player_name: str, updates: dict) -> pd.DataFrame:
+def _update_player_row(
+    players_excel_df: pd.DataFrame,
+    internal_id: str,
+    player_id: str,
+    player_name: str,
+    updates: dict,
+) -> pd.DataFrame:
     df = players_excel_df.copy()
+    iid = _clean_str(internal_id)
     pid = _clean_str(player_id)
     pname = _clean_str(player_name)
 
+    if INTERNAL_ID_COL not in df.columns:
+        df[INTERNAL_ID_COL] = None
     if "playerId" not in df.columns:
         df["playerId"] = None
+    if INTERNAL_POSITION_COL not in df.columns:
+        df[INTERNAL_POSITION_COL] = None
     if "playerName" not in df.columns:
         df["playerName"] = ""
 
-    # Prefer updating by playerId; fallback to playerName.
-    if pid:
-        mask = df["playerId"].astype(str).str.strip() == pid
+    # Prefer updating by internal_id, then by playerId; fallback to playerName.
+    if iid:
+        mask = df[INTERNAL_ID_COL].apply(_clean_str) == iid
+    elif pid:
+        mask = df["playerId"].apply(_clean_str) == pid
     else:
-        mask = df["playerName"].astype(str).str.strip().str.lower() == pname.lower()
+        mask = df["playerName"].apply(lambda x: _clean_str(x).lower()) == pname.lower()
 
     if not mask.any():
         raise ValueError("No se encontró el jugador en el Excel para actualizar.")
@@ -220,6 +400,36 @@ def _update_player_row(players_excel_df: pd.DataFrame, player_id: str, player_na
         df.loc[mask, key] = value
 
     return df
+
+def _delete_player_row(
+    players_excel_df: pd.DataFrame,
+    internal_id: str,
+    player_id: str,
+    player_name: str,
+) -> pd.DataFrame:
+    df = players_excel_df.copy()
+    iid = _clean_str(internal_id)
+    pid = _clean_str(player_id)
+    pname = _clean_str(player_name)
+
+    if INTERNAL_ID_COL not in df.columns:
+        df[INTERNAL_ID_COL] = None
+    if "playerId" not in df.columns:
+        df["playerId"] = None
+    if "playerName" not in df.columns:
+        df["playerName"] = ""
+
+    if iid:
+        mask = df[INTERNAL_ID_COL].apply(_clean_str) == iid
+    elif pid:
+        mask = df["playerId"].apply(_clean_str) == pid
+    else:
+        mask = df["playerName"].apply(lambda x: _clean_str(x).lower()) == pname.lower()
+
+    if not mask.any():
+        raise ValueError("No se encontró el jugador en el Excel para eliminar.")
+
+    return df.loc[~mask].reset_index(drop=True)
 
 def _load_player_positions(engine, player_ids: list[str]) -> pd.DataFrame:
     """Return primary (most frequent) position code per playerId from player_data."""
@@ -318,7 +528,11 @@ with st.sidebar:
     except FileNotFoundError:
         pass
 
-st.markdown("Revise y modifique el estado *Activo/Inactivo* de los jugadores. Use el menú de opciones en la columna **activo** para cambiar 1=Activo, 0=Inactivo. Haga clic en **Guardar cambios** para persistir los datos.")
+st.markdown(
+    "Revise y modifique el estado *Activo/Inactivo* de los jugadores. "
+    "Cada jugador tiene un **internal_id** autogenerado por el sistema. "
+    "El `playerId` de WhoScored es opcional para poder añadir jugadores sin historial en WhoScored."
+)
 
 players_df = load_players_df(PLAYERS_FILE_XLSX).copy()
 # Sort alphabetically by playerName (case-insensitive)
@@ -334,14 +548,24 @@ if not players_df.empty and "playerName" in players_df.columns:
 # --- DB players selector ------------------------------------------------
 engine = connect_to_db()
 
-with st.expander("➕ Añadir jugador desde base de datos", expanded=False):
-    st.markdown("Añade un jugador escribiendo su nombre y buscando su `playerId` en `player_data`.")
+with st.expander("➕ Añadir jugador", expanded=False):
+    st.markdown(
+        "Escribe el nombre para buscar IDs sugeridos en WhoScored. "
+        "También puedes añadir al jugador sin `playerId`; el sistema asignará `internal_id` automáticamente."
+    )
     manual_name = st.text_input(
-        "Nombre del jugador (tal cual aparece en la BD)",
+        "Nombre del jugador",
         value="",
         key="manual_player_name",
-        help="Buscamos coincidencias en la tabla player_data para rellenar playerId automáticamente."
+        help="Buscamos coincidencias en `player_data` para sugerir posibles IDs de WhoScored."
     ).strip()
+    manual_internal_position = st.selectbox(
+        "Posición interna (opcional)",
+        options=INTERNAL_POSITION_OPTIONS,
+        index=0,
+        key="manual_player_internal_position",
+        help="Si eliges 'Auto (WhoScored)', se usará la posición inferida de WhoScored cuando exista.",
+    )
 
     photo_file_input = st.file_uploader(
         "Foto (archivo, opcional — recomendado)",
@@ -395,11 +619,12 @@ with st.expander("➕ Añadir jugador desde base de datos", expanded=False):
         else:
             candidates = find_player_candidates_by_name(engine, manual_name)
             if candidates.empty:
-                st.error("No se encontraron coincidencias en `player_data` para ese nombre.")
+                st.info("No se encontraron coincidencias en `player_data` para ese nombre. Puedes añadirlo sin `playerId`.")
             else:
                 candidates = candidates.copy()
                 candidates["playerId"] = candidates["playerId"].apply(lambda x: str(x).strip() if pd.notna(x) else None)
                 candidates["playerName"] = candidates["playerName"].astype(str).str.strip()
+                candidates["whoscored_url"] = candidates["playerId"].apply(_whoscored_player_url)
                 st.session_state["lookup_candidates"] = candidates.to_dict(orient="records")
                 st.session_state["lookup_selected_idx"] = 0
 
@@ -418,7 +643,27 @@ with st.expander("➕ Añadir jugador desde base de datos", expanded=False):
         )
         st.session_state["lookup_selected_idx"] = options.index(chosen_label)
 
-        if st.button("Añadir seleccionado", key="lookup_add_btn"):
+        candidates_df = pd.DataFrame(lookup_candidates)
+        if not candidates_df.empty:
+            st.dataframe(
+                candidates_df[["playerName", "playerId", "cnt", "whoscored_url"]],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "playerName": st.column_config.TextColumn("Jugador"),
+                    "playerId": st.column_config.TextColumn("WhoScored ID"),
+                    "cnt": st.column_config.NumberColumn("Partidos detectados"),
+                    "whoscored_url": st.column_config.LinkColumn("Enlace WhoScored"),
+                },
+            )
+            st.markdown("**Lista sugerida con enlace de WhoScored**")
+            for c in lookup_candidates:
+                pid = _clean_str(c.get("playerId"))
+                pname = _clean_str(c.get("playerName"))
+                if pid:
+                    st.markdown(f"- {pname} (`{pid}`): [WhoScored]({_whoscored_player_url(pid)})")
+
+        if st.button("Añadir con WhoScored seleccionado", key="lookup_add_btn"):
             chosen = lookup_candidates[int(st.session_state.get("lookup_selected_idx") or 0)]
             chosen_name = (chosen.get("playerName") or "").strip()
             chosen_id = (chosen.get("playerId") or "").strip()
@@ -435,15 +680,23 @@ with st.expander("➕ Añadir jugador desde base de datos", expanded=False):
                 st.warning("Ese playerId ya existe en el Excel. No se añadió duplicado.")
                 st.stop()
 
+            internal_id = _next_internal_id(players_df)
             photo_value = photo_url_input or None
             if photo_file_input is not None:
                 try:
-                    photo_value = _save_uploaded_photo(photo_file_input, player_id=chosen_id, player_name=chosen_name)
+                    photo_value = _save_uploaded_photo(
+                        photo_file_input,
+                        player_id=chosen_id,
+                        player_name=chosen_name,
+                        internal_id=internal_id,
+                    )
                 except Exception as e:
                     st.warning(f"No se pudo procesar la foto subida: {e}")
             new_row = pd.DataFrame([{
+                INTERNAL_ID_COL: internal_id,
                 "playerName": chosen_name,
                 "playerId": chosen_id,
+                INTERNAL_POSITION_COL: _normalize_internal_position(manual_internal_position),
                 "activo": 1,
                 "photo_url": photo_value,
             }])
@@ -452,8 +705,40 @@ with st.expander("➕ Añadir jugador desde base de datos", expanded=False):
             load_players_df.clear()
             st.session_state.pop("lookup_candidates", None)
             st.session_state.pop("lookup_selected_idx", None)
-            st.success(f"Jugador '{chosen_name}' añadido correctamente con ID {chosen_id}.")
+            st.success(
+                f"Jugador '{chosen_name}' añadido correctamente "
+                f"(internal_id: {internal_id}, playerId: {chosen_id})."
+            )
             st.rerun()
+
+    if st.button("Añadir sin WhoScored ID", key="add_without_whoscored_btn", disabled=(not manual_name)):
+        internal_id = _next_internal_id(players_df)
+        photo_value = photo_url_input or None
+        if photo_file_input is not None:
+            try:
+                photo_value = _save_uploaded_photo(
+                    photo_file_input,
+                    player_id="",
+                    player_name=manual_name,
+                    internal_id=internal_id,
+                )
+            except Exception as e:
+                st.warning(f"No se pudo procesar la foto subida: {e}")
+        new_row = pd.DataFrame([{
+            INTERNAL_ID_COL: internal_id,
+            "playerName": manual_name,
+            "playerId": None,
+            INTERNAL_POSITION_COL: _normalize_internal_position(manual_internal_position),
+            "activo": 1,
+            "photo_url": photo_value,
+        }])
+        players_df = pd.concat([players_df, new_row], ignore_index=True)
+        save_players_df(players_df, PLAYERS_FILE_XLSX)
+        load_players_df.clear()
+        st.session_state.pop("lookup_candidates", None)
+        st.session_state.pop("lookup_selected_idx", None)
+        st.success(f"Jugador '{manual_name}' añadido sin WhoScored ID (internal_id: {internal_id}).")
+        st.rerun()
 
 if players_df.empty:
     st.info("No se encontraron jugadores. Puede cargar el archivo correspondiente desde la página principal.")
@@ -464,6 +749,11 @@ status_filter = st.selectbox(
     options=["Todos", "Activos", "Inactivos"],
     index=0,
     help="Filtra la tabla por el estado de activo"
+)
+st.markdown(
+    "<span style='color:#166534;font-weight:700'>Activo</span> | "
+    "<span style='color:#991b1b;font-weight:700'>Inactivo</span>",
+    unsafe_allow_html=True,
 )
 
 if status_filter == "Activos":
@@ -510,8 +800,17 @@ def _position_label_from_code(code: object) -> str:
     s_norm = s.upper() if (" " not in s and len(s) <= 4) else s
     return POSITION_CODE_TO_LABEL.get(s_norm, s)
 
-display_df["position_label"] = display_df.get("position_code", pd.Series(dtype="object")).apply(_position_label_from_code)
+if INTERNAL_POSITION_COL not in display_df.columns:
+    display_df[INTERNAL_POSITION_COL] = None
+display_df[INTERNAL_POSITION_COL] = display_df[INTERNAL_POSITION_COL].apply(_normalize_internal_position)
+display_df["position_label_ws"] = display_df.get("position_code", pd.Series(dtype="object")).apply(_position_label_from_code)
+display_df["position_label"] = display_df[INTERNAL_POSITION_COL].where(
+    display_df[INTERNAL_POSITION_COL].apply(lambda x: _clean_str(x) != ""),
+    display_df["position_label_ws"],
+)
+display_df["position_label"] = display_df["position_label"].fillna("Unknown")
 display_df["photo_preview"] = display_df.get("photo_url", pd.Series(dtype="object")).apply(_build_photo_preview)
+display_df["whoscored_link"] = display_df.get("playerId", pd.Series(dtype="object")).apply(_whoscored_player_url)
 
 # Sort UI by position, then name (does not affect Excel persistence order)
 pos_rank = {p: i for i, p in enumerate(POSITION_ORDER)}
@@ -542,70 +841,164 @@ with st.expander("🖼️ Tarjetas de jugadores", expanded=True):
     # Group by position label
     display_df_cards = display_df.copy()
     display_df_cards["playerName"] = display_df_cards["playerName"].astype(str).str.strip()
-    display_df_cards = display_df_cards.sort_values(by=["position_label", "playerName"], kind="stable")
+    player_name_options = sorted(
+        [
+            n
+            for n in display_df_cards["playerName"].dropna().astype(str).str.strip().unique().tolist()
+            if n
+        ],
+        key=lambda x: x.lower(),
+    )
+    selected_name = st.selectbox(
+        "Search by player name",
+        options=[None, *player_name_options],
+        index=0,
+        key="cards_search_name_select",
+        placeholder="Type to see suggestions...",
+        format_func=lambda x: "All players" if x is None else x,
+    )
+    if selected_name:
+        display_df_cards = display_df_cards[
+            display_df_cards["playerName"].astype(str).str.strip() == str(selected_name).strip()
+        ].copy()
 
-    positions = [p for p in POSITION_ORDER if p in display_df_cards["position_label"].unique().tolist()]
-    extra = [p for p in display_df_cards["position_label"].unique().tolist() if p not in POSITION_ORDER]
-    positions = positions + sorted(extra)
+    broad_position_map = {
+        "Goalkeeper": "Goalkeepers",
+        "Center Back": "Defenders",
+        "Left Back": "Defenders",
+        "Right Back": "Defenders",
+        "Defensive Midfielder": "Midfielders",
+        "Midfielder": "Midfielders",
+        "Attacking Midfielder": "Midfielders",
+        "Left Winger": "Midfielders",
+        "Right Winger": "Midfielders",
+        "Striker": "Forwards",
+    }
+    group_order = ["Goalkeepers", "Defenders", "Midfielders", "Forwards"]
+    display_df_cards["line_group"] = display_df_cards["position_label"].map(broad_position_map).fillna("Midfielders")
+    display_df_cards = display_df_cards.sort_values(by=["line_group", "position_label", "playerName"], kind="stable")
 
-    for pos in positions:
-        group = display_df_cards[display_df_cards["position_label"] == pos].copy()
+    found_any_group = False
+    for line_group in group_order:
+        group = display_df_cards[display_df_cards["line_group"] == line_group].copy()
         if group.empty:
             continue
-        st.subheader(f"{pos} ({len(group)})")
-        card_cols = st.columns(3)
+        found_any_group = True
+        group_container = st.expander(f"{line_group} ({len(group)})", expanded=True)
+        card_cols = group_container.columns(3)
         for i, row in enumerate(group.fillna("").to_dict(orient="records")):
             with card_cols[i % 3]:
                 with st.container(border=True):
+                    iid = _clean_str(row.get(INTERNAL_ID_COL))
                     pid = _clean_str(row.get("playerId"))
                     pname = _clean_str(row.get("playerName"))
-                    player_key = pid if pid else f"name:{pname.lower()}"
+                    player_key = iid if iid else (pid if pid else f"name:{pname.lower()}:{i}")
                     widget_suffix = _safe_slug(f"{player_key}_{i}")
+                    current_active = int(row.get("activo") or 0) == 1
 
-                    photo_src = _clean_str(row.get("photo_url"))
-                    if photo_src:
-                        if photo_src.startswith(("http://", "https://", "data:")):
-                            st.image(photo_src, use_container_width=True)
-                        else:
-                            abs_p = _photo_src_to_abs_path(photo_src)
-                            if abs_p.exists():
-                                st.image(str(abs_p), use_container_width=True)
-                            else:
-                                st.caption("Foto no encontrada")
-                    else:
-                        st.caption("Sin foto")
+                    photo_preview = _clean_str(row.get("photo_preview"))
+                    if not photo_preview:
+                        photo_preview = _build_photo_preview(row.get("photo_url")) or ""
+                    st.markdown(_player_photo_block_html(photo_preview if photo_preview else None), unsafe_allow_html=True)
 
-                    st.markdown(f"**{pname}**")
-                    st.caption(f"Posición: {row.get('position_label','Unknown')}")
-                    st.caption(f"ID: {pid if pid else '—'}")
-                    st.caption(f"Estado: {'Activo' if str(row.get('activo')) == '1' else 'Inactivo'}")
-                    mp = row.get("matches_played", "")
-                    lt = row.get("last_team", "")
-                    lmd = row.get("last_match_date", "")
-                    st.caption(f"Partidos: {mp if mp != '' else '—'}")
-                    st.caption(f"Último equipo: {lt if lt != '' else '—'}")
-                    st.caption(f"Último partido: {str(lmd)[:10] if lmd else '—'}")
+                    position_label = _clean_str(row.get("position_label")) or "Unknown"
+                    st.markdown(_player_card_title_html(pname, position_label), unsafe_allow_html=True)
+                    st.markdown(_active_status_badge_html(current_active), unsafe_allow_html=True)
 
-                    col_a, col_b = st.columns(2)
+                    delete_armed_key = f"delete_armed_{widget_suffix}"
+                    col_a, col_b, col_c = st.columns(3)
                     with col_a:
-                        if st.button("Ver / editar", key=f"open_{widget_suffix}"):
+                        if st.button("ℹ️", key=f"open_{widget_suffix}", help="Más detalles"):
                             st.session_state["manage_players_selected"] = player_key
                             st.rerun()
                     with col_b:
-                        is_open = st.session_state.get("manage_players_selected") == player_key
-                        if st.button("Cerrar", key=f"close_{widget_suffix}", disabled=(not is_open)):
-                            st.session_state.pop("manage_players_selected", None)
-                            st.rerun()
+                        quick_toggle_label = "🔴" if current_active else "🟢"
+                        quick_toggle_help = "Desactivar jugador" if current_active else "Activar jugador"
+                        if st.button(
+                            quick_toggle_label,
+                            key=f"toggle_active_{widget_suffix}",
+                            help=quick_toggle_help,
+                        ):
+                            try:
+                                players_df = _update_player_row(
+                                    players_df,
+                                    internal_id=iid,
+                                    player_id=pid,
+                                    player_name=pname,
+                                    updates={"activo": 0 if current_active else 1},
+                                )
+                                save_players_df(players_df, PLAYERS_FILE_XLSX)
+                                load_players_df.clear()
+                                st.success(f"Jugador {'desactivado' if current_active else 'activado'}.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"No se pudo actualizar el estado: {e}")
+                    with col_c:
+                        if st.button("🗑️", key=f"ask_delete_{widget_suffix}", type="secondary", help="Eliminar jugador"):
+                            st.session_state[delete_armed_key] = True
+
+                    if st.session_state.get(delete_armed_key):
+                        st.warning("Confirmar eliminación del jugador.")
+                        del_yes, del_no = st.columns(2)
+                        with del_yes:
+                            if st.button("Confirmar", key=f"confirm_delete_{widget_suffix}", type="primary"):
+                                try:
+                                    players_df = _delete_player_row(
+                                        players_df,
+                                        internal_id=iid,
+                                        player_id=pid,
+                                        player_name=pname,
+                                    )
+                                    save_players_df(players_df, PLAYERS_FILE_XLSX)
+                                    load_players_df.clear()
+                                    st.session_state.pop(delete_armed_key, None)
+                                    if st.session_state.get("manage_players_selected") == player_key:
+                                        st.session_state.pop("manage_players_selected", None)
+                                    st.success(f"Jugador '{pname}' eliminado correctamente.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"No se pudo eliminar el jugador: {e}")
+                        with del_no:
+                            if st.button("Cancelar", key=f"cancel_delete_{widget_suffix}"):
+                                st.session_state.pop(delete_armed_key, None)
+                                st.rerun()
 
                     if st.session_state.get("manage_players_selected") == player_key:
                         st.divider()
-                        st.markdown("**Editar jugador**")
+                        st.markdown("**Detalles editables**")
+                        st.markdown(_active_status_badge_html(current_active), unsafe_allow_html=True)
+                        st.caption(f"ID interno: {iid if iid else '—'}")
+                        st.caption(f"WhoScored ID actual: {pid if pid else '—'}")
+                        if pid:
+                            st.markdown(f"[WhoScored]({_whoscored_player_url(pid)})")
+                        mp = row.get("matches_played", "")
+                        lt = row.get("last_team", "")
+                        lmd = row.get("last_match_date", "")
+                        st.caption(f"Partidos: {mp if mp != '' else '—'}")
+                        st.caption(f"Último equipo: {lt if lt != '' else '—'}")
+                        st.caption(f"Último partido: {str(lmd)[:10] if lmd else '—'}")
 
-                        current_active = int(row.get("activo") or 0) == 1
+                        current_internal_position = _normalize_internal_position(row.get(INTERNAL_POSITION_COL))
+                        pos_options = INTERNAL_POSITION_OPTIONS.copy()
+                        if current_internal_position and current_internal_position not in pos_options:
+                            pos_options.append(current_internal_position)
                         current_photo_src = _clean_str(row.get("photo_url"))
 
                         with st.form(key=f"edit_form_{widget_suffix}"):
                             new_active = st.checkbox("Activo", value=current_active)
+                            new_internal_position = st.selectbox(
+                                "Posición interna",
+                                options=pos_options,
+                                index=pos_options.index(current_internal_position or AUTO_POSITION_LABEL),
+                                key=f"card_internal_position_{widget_suffix}",
+                                help="Esta posición tiene prioridad sobre la posición detectada de WhoScored.",
+                            )
+                            new_player_id_raw = st.text_input(
+                                "WhoScored playerId (opcional)",
+                                value=pid,
+                                key=f"card_player_id_{widget_suffix}",
+                                help="Si se deja vacío, el jugador queda sin ID de WhoScored."
+                            ).strip()
                             uploaded = st.file_uploader(
                                 "Subir nueva foto",
                                 type=["jpg", "jpeg", "png", "webp"],
@@ -621,12 +1014,17 @@ with st.expander("🖼️ Tarjetas de jugadores", expanded=True):
 
                             submitted = st.form_submit_button("Guardar cambios")
 
-                        col_rm, col_sp = st.columns(2)
+                        col_close, col_rm, col_sp = st.columns(3)
+                        with col_close:
+                            if st.button("Cerrar", key=f"close_{widget_suffix}"):
+                                st.session_state.pop("manage_players_selected", None)
+                                st.rerun()
                         with col_rm:
                             if st.button("Quitar foto", key=f"remove_photo_{widget_suffix}", disabled=(not current_photo_src)):
                                 try:
                                     players_df = _update_player_row(
                                         players_df,
+                                        internal_id=iid,
                                         player_id=pid,
                                         player_name=pname,
                                         updates={"photo_url": None},
@@ -640,18 +1038,42 @@ with st.expander("🖼️ Tarjetas de jugadores", expanded=True):
                         with col_sp:
                             if submitted:
                                 try:
+                                    new_player_id = normalize_whoscored_player_id(new_player_id_raw)
+                                    existing_ids = (
+                                        players_df.loc[
+                                            players_df[INTERNAL_ID_COL].apply(_clean_str) != iid,
+                                            "playerId",
+                                        ]
+                                        .apply(normalize_whoscored_player_id)
+                                        .dropna()
+                                        .astype(str)
+                                        .str.strip()
+                                        .tolist()
+                                    )
+                                    if new_player_id and new_player_id in set(existing_ids):
+                                        st.error(f"El playerId {new_player_id} ya existe en otro jugador.")
+                                        st.stop()
+
                                     photo_value = current_photo_src or None
                                     if uploaded is not None:
-                                        photo_value = _save_uploaded_photo(uploaded, player_id=pid, player_name=pname)
+                                        photo_value = _save_uploaded_photo(
+                                            uploaded,
+                                            player_id=new_player_id or pid,
+                                            player_name=pname,
+                                            internal_id=iid,
+                                        )
                                     elif new_photo_url:
                                         photo_value = new_photo_url
 
                                     players_df = _update_player_row(
                                         players_df,
+                                        internal_id=iid,
                                         player_id=pid,
                                         player_name=pname,
                                         updates={
                                             "activo": 1 if new_active else 0,
+                                            "playerId": new_player_id,
+                                            INTERNAL_POSITION_COL: _normalize_internal_position(new_internal_position),
                                             "photo_url": photo_value,
                                         },
                                     )
@@ -662,11 +1084,40 @@ with st.expander("🖼️ Tarjetas de jugadores", expanded=True):
                                 except Exception as e:
                                     st.error(f"Error al guardar cambios: {e}")
 
+    if not found_any_group:
+        st.info("No players found for this search.")
+
 with st.expander("📋 Vista avanzada (tabla)", expanded=False):
+    editor_df = display_df.copy()
+    editor_df[INTERNAL_POSITION_COL] = editor_df.get(INTERNAL_POSITION_COL, pd.Series(dtype="object")).apply(
+        lambda x: _normalize_internal_position(x) or AUTO_POSITION_LABEL
+    )
+    editor_df["activo"] = pd.to_numeric(editor_df.get("activo", 0), errors="coerce").fillna(0).astype(int).eq(1)
+
     edited_df = st.data_editor(
-        display_df[["playerName", "playerId", "position_label", "activo", "photo_preview", "photo_url", "matches_played", "last_team", "last_match_date"]],
+        editor_df[
+            [
+                INTERNAL_ID_COL,
+                "playerName",
+                "playerId",
+                INTERNAL_POSITION_COL,
+                "whoscored_link",
+                "position_label",
+                "activo",
+                "photo_preview",
+                "photo_url",
+                "matches_played",
+                "last_team",
+                "last_match_date",
+            ]
+        ],
         num_rows="dynamic",
         column_config={
+            INTERNAL_ID_COL: st.column_config.TextColumn(
+                "ID interno",
+                required=True,
+                help="Identificador interno autogenerado por el sistema."
+            ),
             "playerName": st.column_config.TextColumn(
                 "Nombre del jugador",
                 required=True,
@@ -675,8 +1126,15 @@ with st.expander("📋 Vista avanzada (tabla)", expanded=False):
             "playerId": st.column_config.TextColumn(
                 "playerId",
                 required=False,
-                help="Identificador del jugador (requerido para jugadores activos)"
+                help="Identificador WhoScored. Opcional para jugadores sin historial en WhoScored."
             ),
+            INTERNAL_POSITION_COL: st.column_config.SelectboxColumn(
+                "Posición interna",
+                options=INTERNAL_POSITION_OPTIONS,
+                required=True,
+                help="Si eliges 'Auto (WhoScored)', se usará la posición detectada automáticamente.",
+            ),
+            "whoscored_link": st.column_config.LinkColumn("WhoScored"),
             "position_label": st.column_config.TextColumn("Posición", disabled=True),
             "photo_preview": st.column_config.ImageColumn("Foto"),
             "photo_url": st.column_config.TextColumn(
@@ -684,73 +1142,90 @@ with st.expander("📋 Vista avanzada (tabla)", expanded=False):
                 required=False,
                 help="URL pública o ruta local (por ejemplo: data/player_photos/123.jpg)."
             ),
-            "activo": st.column_config.SelectboxColumn(
-                "Activo (1=Sí, 0=No)",
-                help="1 = jugador activo, 0 = jugador inactivo",
-                options=[1, 0],
-                required=True,
-                width="small"
+            "activo": st.column_config.CheckboxColumn(
+                "Activo",
+                help="Activa o desactiva al jugador con un click.",
+                width="small",
             ),
             "matches_played": st.column_config.NumberColumn("Partidos", disabled=True),
             "last_team": st.column_config.TextColumn("Último equipo", disabled=True),
             "last_match_date": st.column_config.DatetimeColumn("Último partido", disabled=True),
         },
-        disabled=["position_label", "photo_preview", "matches_played", "last_team", "last_match_date"],
+        disabled=[INTERNAL_ID_COL, "whoscored_link", "position_label", "photo_preview", "matches_played", "last_team", "last_match_date"],
         key="players_table_editor"
     )
 
     if st.button("Guardar cambios (tabla)", type="primary"):
         try:
-            # Merge edits back into the full dataframe by playerName
             df_to_save = players_df.copy()
+            df_to_save = _ensure_internal_ids(df_to_save)
             if "photo_url" not in df_to_save.columns:
                 df_to_save["photo_url"] = None
             edits = edited_df.copy()
-            # Normalize keys for merge
-            df_to_save["playerName_key"] = df_to_save["playerName"].astype(str).str.strip().str.lower()
-            edits["playerName_key"] = edits["playerName"].astype(str).str.strip().str.lower()
+            if INTERNAL_ID_COL not in edits.columns:
+                st.error("No se encontró la columna de ID interno en los cambios de la tabla.")
+                st.stop()
 
-            # Update rows existing in df_to_save with edits
-            edit_cols = ["playerName", "playerId", "activo"]
+            df_to_save[INTERNAL_ID_COL] = df_to_save[INTERNAL_ID_COL].apply(_clean_str)
+            edits[INTERNAL_ID_COL] = edits[INTERNAL_ID_COL].apply(_clean_str)
+
+            df_to_save["internal_key"] = df_to_save[INTERNAL_ID_COL]
+            edits["internal_key"] = edits[INTERNAL_ID_COL]
+
+            edit_cols = ["playerName", "playerId", INTERNAL_POSITION_COL, "activo"]
             if "photo_url" in edits.columns:
                 edit_cols.append("photo_url")
-            update_map = edits.set_index("playerName_key")[edit_cols].to_dict(orient="index")
+            edits_lookup = edits[edits["internal_key"] != ""].drop_duplicates(subset=["internal_key"], keep="last")
+            update_map = edits_lookup.set_index("internal_key")[edit_cols].to_dict(orient="index")
+
             def apply_update(row):
-                key = row["playerName_key"]
+                key = row["internal_key"]
                 if key in update_map:
                     upd = update_map[key]
                     row["playerName"] = upd.get("playerName", row["playerName"])
                     row["playerId"] = upd.get("playerId", row.get("playerId"))
+                    row[INTERNAL_POSITION_COL] = upd.get(INTERNAL_POSITION_COL, row.get(INTERNAL_POSITION_COL))
                     row["activo"] = upd.get("activo", row.get("activo", 1))
                     if "photo_url" in upd:
                         row["photo_url"] = upd.get("photo_url", row.get("photo_url"))
                 return row
+
             df_to_save = df_to_save.apply(apply_update, axis=1)
-            df_to_save = df_to_save.drop(columns=["playerName_key"], errors='ignore')
+            df_to_save = df_to_save.drop(columns=["internal_key"], errors='ignore')
 
             # Normalize whitespace and types
             df_to_save["playerName"] = df_to_save["playerName"].astype(str).str.strip()
             df_to_save["playerId"] = df_to_save["playerId"].astype("string").where(df_to_save["playerId"].notna(), None)
             df_to_save["playerId"] = df_to_save["playerId"].apply(lambda x: x.strip() if isinstance(x, str) else x)
+            df_to_save["playerId"] = df_to_save["playerId"].apply(normalize_whoscored_player_id)
+            df_to_save["playerId"] = df_to_save["playerId"].astype("string").where(df_to_save["playerId"].notna(), None)
+            if INTERNAL_POSITION_COL not in df_to_save.columns:
+                df_to_save[INTERNAL_POSITION_COL] = None
+            df_to_save[INTERNAL_POSITION_COL] = df_to_save[INTERNAL_POSITION_COL].apply(_normalize_internal_position)
             df_to_save["activo"] = pd.to_numeric(df_to_save["activo"], errors="coerce").fillna(1).astype(int).clip(0, 1)
             if "photo_url" in df_to_save.columns:
                 df_to_save["photo_url"] = df_to_save["photo_url"].astype("string").where(df_to_save["photo_url"].notna(), None)
                 df_to_save["photo_url"] = df_to_save["photo_url"].apply(lambda x: x.strip() if isinstance(x, str) else x)
+            df_to_save = _ensure_internal_ids(df_to_save)
 
             # Validation rules
             errors = []
             # 1) Names required
             if (df_to_save["playerName"].str.len() == 0).any():
                 errors.append("Hay jugadores con nombre vacío.")
-            # 2) Active players must have non-empty playerId
-            active_without_id = df_to_save[(df_to_save["activo"] == 1) & ((df_to_save["playerId"].isna()) | (df_to_save["playerId"].astype(str).str.strip() == ""))]
-            if not active_without_id.empty:
-                errors.append("Jugadores activos sin playerId. Asigne un playerId antes de guardar.")
-            # 3) playerId uniqueness among non-null IDs
+            # 2) playerId uniqueness among non-null IDs
             ids = df_to_save["playerId"].dropna().astype(str).str.strip()
+            ids = ids[ids != ""]
             if ids.duplicated().any():
                 dupes = ids[ids.duplicated()].unique().tolist()
                 errors.append(f"playerId duplicados: {', '.join(dupes)}")
+            # 3) internal_id must exist and be unique
+            internal_ids = df_to_save[INTERNAL_ID_COL].apply(_clean_str)
+            if (internal_ids == "").any():
+                errors.append("Hay jugadores sin ID interno.")
+            if internal_ids.duplicated().any():
+                dupes = internal_ids[internal_ids.duplicated()].unique().tolist()
+                errors.append(f"internal_id duplicados: {', '.join(dupes)}")
 
             if errors:
                 for e in errors:

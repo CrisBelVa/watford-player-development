@@ -9,6 +9,8 @@ sqlalchemy
 pymysql
 mysql-connector-python
 python-dotenv
+fpdf2
+kaleido
 pdfkit
 wkhtmltopdf
 openpyxl
