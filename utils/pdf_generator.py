@@ -144,18 +144,32 @@ class WatfordPlayerReport(FPDF):
         self.cell(0, 10, str(season), 0, 1, 'L')
         self.ln(3)
         
-        # Date Range (BLANCO)
+        # Delta Range (BLANCO)
         self.set_font('Arial', 'B', 14)
         self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
-        self.cell(60, 10, 'Date Range:', 0, 0, 'L')
+        self.cell(60, 10, 'Delta Range:', 0, 0, 'L')
         self.set_font('Arial', '', 14)
-        start = filters_data.get('start_date', 'N/A')
-        end = filters_data.get('end_date', 'N/A')
-        if isinstance(start, pd.Timestamp):
-            start = start.strftime('%Y-%m-%d')
-        if isinstance(end, pd.Timestamp):
-            end = end.strftime('%Y-%m-%d')
-        self.cell(0, 10, f'{start} to {end}', 0, 1, 'L')
+        delta_start = filters_data.get('delta_start_date', filters_data.get('start_date', 'N/A'))
+        delta_end = filters_data.get('delta_end_date', filters_data.get('end_date', 'N/A'))
+        if isinstance(delta_start, pd.Timestamp):
+            delta_start = delta_start.strftime('%Y-%m-%d')
+        if isinstance(delta_end, pd.Timestamp):
+            delta_end = delta_end.strftime('%Y-%m-%d')
+        self.cell(0, 10, f'{delta_start} to {delta_end}', 0, 1, 'L')
+        self.ln(3)
+
+        # Reference Range (BLANCO)
+        self.set_font('Arial', 'B', 14)
+        self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
+        self.cell(60, 10, 'Reference Range:', 0, 0, 'L')
+        self.set_font('Arial', '', 14)
+        ref_start = filters_data.get('reference_start_date', filters_data.get('start_date', 'N/A'))
+        ref_end = filters_data.get('reference_end_date', filters_data.get('end_date', 'N/A'))
+        if isinstance(ref_start, pd.Timestamp):
+            ref_start = ref_start.strftime('%Y-%m-%d')
+        if isinstance(ref_end, pd.Timestamp):
+            ref_end = ref_end.strftime('%Y-%m-%d')
+        self.cell(0, 10, f'{ref_start} to {ref_end}', 0, 1, 'L')
         self.ln(8)
         
         # Selected Matches (BLANCO)
@@ -172,12 +186,13 @@ class WatfordPlayerReport(FPDF):
             # Crear tabla de matches (2 columnas)
             col_width = 135
             row_height = 8
+            max_matches_to_show = 16  # keep filters page compact and avoid near-empty overflow page
             
             for i, match in enumerate(matches):
-                # Limitar a primeros 20 partidos
-                if i >= 20:
+                # Limitar a primeros partidos y resumir el resto
+                if i >= max_matches_to_show:
                     self.set_font('Arial', 'I', 10)
-                    self.cell(0, 8, f'... and {len(matches) - 20} more matches', 0, 1, 'L')
+                    self.cell(0, 8, f'... and {len(matches) - max_matches_to_show} more matches', 0, 1, 'L')
                     break
                 
                 # Alternar columnas
@@ -367,14 +382,12 @@ class WatfordPlayerReport(FPDF):
         Solo columnas relevantes para la posición
         """
         self.add_page()
-        
-        # Subtítulo "Player Stats" (BLANCO)
-        self.set_font('Arial', 'B', 18)
-        self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
-        self.cell(0, 12, 'Player Stats', 0, 1, 'L')
-        self.ln(3)
-        
+
         if df.empty:
+            self.set_font('Arial', 'B', 18)
+            self.set_text_color(*self.COLOR_WHITE)
+            self.cell(0, 12, 'Player Stats', 0, 1, 'L')
+            self.ln(3)
             self.set_font('Arial', 'I', 12)
             self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
             self.cell(0, 10, 'No data available', 0, 1, 'C')
@@ -389,7 +402,13 @@ class WatfordPlayerReport(FPDF):
         
         # Filtrar df
         df_table = df[table_columns].copy()
-        
+
+        # Some feeds store xA in centi-units (e.g., 15 == 0.15). Normalize only when detected.
+        if "xA" in df_table.columns:
+            xa_numeric = pd.to_numeric(df_table["xA"], errors="coerce")
+            if xa_numeric.dropna().quantile(0.75) > 3:
+                df_table["xA"] = xa_numeric / 100.0
+
         # Formatear fecha
         if 'matchDate' in df_table.columns:
             df_table['matchDate'] = pd.to_datetime(df_table['matchDate']).dt.strftime('%Y-%m-%d')
@@ -438,7 +457,7 @@ class WatfordPlayerReport(FPDF):
             "goals": "Goals",
             "assists": "Assists",
             "xG": "xG",
-            "xA": "xA",
+            "xA": "A.Shots",
         }
         
         for col in available_kpis:
@@ -458,19 +477,37 @@ class WatfordPlayerReport(FPDF):
         metric_width = remaining_width / len(available_kpis) if available_kpis else 20
         
         col_widths = [date_width, opponent_width] + [metric_width] * len(available_kpis)
-        
-        # Headers (AMARILLO con texto NEGRO)
-        self.set_fill_color(*self.COLOR_YELLOW)
-        self.set_text_color(*self.COLOR_BLACK)
-        self.set_font('Arial', 'B', 7)
-        
-        for col_name, width in zip(df_table.columns, col_widths):
-            self.cell(width, 8, str(col_name), 1, 0, 'C', True)
-        self.ln()
-        
-        # Rows (LETRAS BLANCAS)
-        self.set_font('Arial', '', 6)
-        self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
+
+        # Section pagination label for stats table pages (e.g. 1/3, 2/3, 3/3).
+        title_height = 12
+        title_spacing = 3
+        header_height = 8
+        row_height = 6
+        page_break_y = 175
+        title_start_y = self.get_y()
+        table_rows_start_y = title_start_y + title_height + title_spacing + header_height
+        rows_per_page = max(1, int((page_break_y - table_rows_start_y) // row_height) + 1)
+        total_table_pages = max(1, int(np.ceil(len(df_table) / rows_per_page)))
+        current_table_page = 1
+
+        def render_stats_table_header(page_index: int):
+            suffix = f" {page_index}/{total_table_pages}" if total_table_pages > 1 else ""
+            self.set_font('Arial', 'B', 18)
+            self.set_text_color(*self.COLOR_WHITE)
+            self.cell(0, title_height, f'Player Stats{suffix}', 0, 1, 'L')
+            self.ln(title_spacing)
+
+            self.set_fill_color(*self.COLOR_YELLOW)
+            self.set_text_color(*self.COLOR_BLACK)
+            self.set_font('Arial', 'B', 7)
+            for col_name, width in zip(df_table.columns, col_widths):
+                self.cell(width, header_height, str(col_name), 1, 0, 'C', True)
+            self.ln()
+
+            self.set_font('Arial', '', 6)
+            self.set_text_color(*self.COLOR_WHITE)
+
+        render_stats_table_header(current_table_page)
         
         for idx, row in df_table.iterrows():
             # Alternar color de fondo
@@ -490,30 +527,8 @@ class WatfordPlayerReport(FPDF):
             # Pagination: nueva página si nos quedamos sin espacio
             if self.get_y() > 175:
                 self.add_page()
-                
-                # ✅ Re-imprimir subtítulo "Player Stats" EN BLANCO
-                self.set_font('Arial', 'B', 18)
-                self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
-                self.cell(0, 12, 'Player Stats', 0, 1, 'L')
-                self.ln(3)
-                
-                # Re-imprimir headers de tabla
-                self.set_fill_color(*self.COLOR_YELLOW)
-                self.set_text_color(*self.COLOR_BLACK)
-                self.set_font('Arial', 'B', 7)
-                for col_name, width in zip(df_table.columns, col_widths):
-                    self.cell(width, 8, str(col_name), 1, 0, 'C', True)
-                self.ln()
-                self.set_font('Arial', '', 6)
-                self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO        
-                # Re-imprimir headers de tabla
-                self.set_fill_color(*self.COLOR_YELLOW)
-                self.set_text_color(*self.COLOR_BLACK)
-                self.set_font('Arial', 'B', 7)
-                for col_name, width in zip(df_table.columns, col_widths):
-                    self.cell(width, 8, str(col_name), 1, 0, 'C', True)
-                self.ln()
-                self.set_font('Arial', '', 6)
+                current_table_page += 1
+                render_stats_table_header(current_table_page)
 
 
     def trends_stats_page(self, trends_data):
@@ -522,68 +537,72 @@ class WatfordPlayerReport(FPDF):
         """
         if not trends_data:
             return
-        
-        self.add_page()
-        
-        # Título de la sección (más compacto)
-        self.set_font('Arial', 'B', 16)  # ← REDUCIDO de 18 a 16
-        self.set_text_color(*self.COLOR_WHITE)
-        self.cell(0, 10, 'Trends Stats', 0, 1, 'L')  # ← REDUCIDO de 12 a 10
-        self.ln(2)  # ← REDUCIDO de 5 a 2
-        
-        # ✅ 2 GRÁFICOS POR PÁGINA CON ESPACIADO AJUSTADO
+
         charts_per_page = 2
-        chart_count = 0
-        
+        charts_on_current_page = 0
+        max_content_y = 188  # Reserve bottom area so footer/page number is never covered.
+        desired_img_width = 270
+        desired_img_height = 58
+
+        def start_trends_page():
+            self.add_page()
+            self.set_font('Arial', 'B', 16)
+            self.set_text_color(*self.COLOR_WHITE)
+            self.cell(0, 10, 'Trends Stats', 0, 1, 'L')
+            self.ln(2)
+
+        start_trends_page()
+
         for item in trends_data:
-            # Nueva página si ya tenemos 2 gráficos
-            if chart_count > 0 and chart_count % charts_per_page == 0:
-                self.add_page()
-                
-                # Re-imprimir título (compacto)
-                self.set_font('Arial', 'B', 16)
-                self.set_text_color(*self.COLOR_WHITE)
-                self.cell(0, 10, 'Trends Stats', 0, 1, 'L')
-                self.ln(2)
-            
+            # Hard cap per page + dynamic cap by available vertical space.
+            estimated_block_height = 6 + 1 + desired_img_height + 5
+            if charts_on_current_page >= charts_per_page or (self.get_y() + estimated_block_height) > max_content_y:
+                start_trends_page()
+                charts_on_current_page = 0
+
+            tmp_path = None
             try:
-                # Guardar gráfico como imagen temporal
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                     tmp_path = tmp.name
-                
-                # Exportar con buena resolución
+
                 pio.write_image(item['fig'], tmp_path, width=1400, height=500, scale=2)
-                
-                # Título del gráfico (compacto)
-                self.set_font('Arial', 'B', 10)  # ← REDUCIDO de 11 a 10
+
+                self.set_font('Arial', 'B', 10)
                 self.set_text_color(*self.COLOR_WHITE)
-                self.cell(0, 6, item['kpi_name'], 0, 1, 'L')  # ← REDUCIDO de 8 a 6
-                self.ln(1)  # ← REDUCIDO de 2 a 1
-                
-                # ✅ INSERTAR IMAGEN (AJUSTADO AL ESPACIO DISPONIBLE)
-                # Landscape A4: altura útil = 210mm - header(35mm) - footer(15mm) = 160mm
-                # Con título "Trends Stats" (12mm) queda: 148mm
-                # 2 gráficos: (148 - 10 espacios) / 2 = ~69mm cada uno
-                img_width = 270
-                img_height = 69  # ← AJUSTADO para que entren 2
-                
-                self.image(tmp_path, x=10, y=self.get_y(), w=img_width, h=img_height)
-                self.ln(img_height + 5)  # ← Espacio entre gráficos (reducido de 8 a 5)
-                
-                # Eliminar archivo temporal
-                try:
-                    os.unlink(tmp_path)
-                except:
-                    pass
-                    
-                chart_count += 1
-                
+                self.cell(0, 6, item['kpi_name'], 0, 1, 'L')
+                self.ln(1)
+
+                y_top = self.get_y()
+                available_height = max_content_y - y_top
+                img_height = min(desired_img_height, available_height)
+
+                # If there is not enough room for a readable chart, move it to next page.
+                if img_height < 35:
+                    start_trends_page()
+                    charts_on_current_page = 0
+                    self.set_font('Arial', 'B', 10)
+                    self.set_text_color(*self.COLOR_WHITE)
+                    self.cell(0, 6, item['kpi_name'], 0, 1, 'L')
+                    self.ln(1)
+                    y_top = self.get_y()
+                    img_height = min(desired_img_height, max_content_y - y_top)
+
+                self.image(tmp_path, x=10, y=y_top, w=desired_img_width, h=img_height)
+                self.ln(img_height + 5)
+                charts_on_current_page += 1
+
             except Exception as e:
                 print(f"Error adding trend chart: {e}")
                 self.set_font('Arial', 'I', 10)
                 self.set_text_color(*self.COLOR_WHITE)
                 self.cell(0, 8, f"[Chart: {item['kpi_name']} - Could not render]", 0, 1, 'L')
                 self.ln(5)
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
 
 
     def player_comparison_page(self, comparison_data, comparison_kpi_table, comparison_charts):
@@ -692,7 +711,7 @@ class WatfordPlayerReport(FPDF):
                 'goals': 'G',
                 'assists': 'A',
                 'xG': 'xG',
-                'xA': 'xA',
+                'xA': 'AShot',
             }
             
             # Headers
@@ -796,6 +815,7 @@ def generate_player_report(
     logo_path,
     calculate_delta_func,
     full_df=None,
+    reference_df=None,
     position_kpi_map=None,
     trends_data=None,
     comparison_data=None,
@@ -838,7 +858,7 @@ def generate_player_report(
         "goals": "Goals",
         "assists": "Assists",
         "xG": "Expected Goals (xG)",
-        "xA": "Expected Assists (xA)",
+        "xA": "Assisted Shots",
         "ps_xG": "Post-Shot xG",
         "recoveries": "Recoveries",
         "interceptions": "Interceptions",
@@ -855,16 +875,34 @@ def generate_player_report(
     }
     
     kpis_data = []
-    baseline_df = full_df if isinstance(full_df, pd.DataFrame) and not full_df.empty else filtered_df
+    metric_scale_factors = {}
+    if isinstance(filtered_df, pd.DataFrame) and "xA" in filtered_df.columns:
+        xa_series = pd.to_numeric(filtered_df["xA"], errors="coerce")
+        if xa_series.dropna().quantile(0.75) > 3:
+            metric_scale_factors["xA"] = 100.0
+
+    if isinstance(reference_df, pd.DataFrame):
+        baseline_df = reference_df
+    elif isinstance(full_df, pd.DataFrame) and not full_df.empty:
+        baseline_df = full_df
+    else:
+        baseline_df = filtered_df
     for kpi in selected_kpis:
         if kpi in aggregated_metrics:
             value = aggregated_metrics[kpi]
             
             # Calcular delta
             delta, delta_pct = calculate_delta_func(filtered_df, baseline_df, kpi)
+
+            scale_factor = metric_scale_factors.get(kpi, 1.0)
+            if isinstance(value, (int, float, np.number)) and pd.notna(value):
+                value = float(value) / scale_factor
+            if isinstance(delta, (int, float, np.number)) and pd.notna(delta):
+                delta = float(delta) / scale_factor
             
             # Formatear valor
-            if isinstance(value, float):
+            if isinstance(value, (int, float, np.number)) and pd.notna(value):
+                value = float(value)
                 if 'pct' in kpi or '%' in kpi:
                     formatted_value = f"{value:.1f}%"
                 elif kpi in ['xG', 'xA', 'ps_xG']:
@@ -1514,18 +1552,36 @@ def generate_individual_development_report_landscape(
     try:
         if fig_comparison:
             temp_comparison = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-            pio.write_image(fig_comparison, temp_comparison.name, width=1000, height=400)
-            fig_comparison_path = temp_comparison.name
-            temp_files.append(temp_comparison.name)
+            temp_comparison_path = temp_comparison.name
+            temp_comparison.close()
+            try:
+                pio.write_image(fig_comparison, temp_comparison_path, width=1000, height=400)
+                fig_comparison_path = temp_comparison_path
+                temp_files.append(temp_comparison_path)
+            except Exception as e:
+                print(f"Error exporting comparison chart image: {e}")
+                try:
+                    os.unlink(temp_comparison_path)
+                except Exception:
+                    pass
         
         if fig_timeline:
             temp_timeline = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-            # ===== REDUCIR ALTURA PARA EVITAR DEFORMACIÓN =====
-            # pio.write_image(fig_timeline, temp_timeline.name, width=1200, height=350)  # ← AJUSTADO
-            # ✅ MAYOR RESOLUCIÓN PARA MEJOR CALIDAD
-            pio.write_image(fig_timeline, temp_timeline.name, width=1600, height=500, scale=2)
-            fig_timeline_path = temp_timeline.name
-            temp_files.append(temp_timeline.name)
+            temp_timeline_path = temp_timeline.name
+            temp_timeline.close()
+            try:
+                # ===== REDUCIR ALTURA PARA EVITAR DEFORMACIÓN =====
+                # pio.write_image(fig_timeline, temp_timeline.name, width=1200, height=350)  # ← AJUSTADO
+                # ✅ MAYOR RESOLUCIÓN PARA MEJOR CALIDAD
+                pio.write_image(fig_timeline, temp_timeline_path, width=1600, height=500, scale=2)
+                fig_timeline_path = temp_timeline_path
+                temp_files.append(temp_timeline_path)
+            except Exception as e:
+                print(f"Error exporting timeline chart image: {e}")
+                try:
+                    os.unlink(temp_timeline_path)
+                except Exception:
+                    pass
         
         # ===== RATING EVOLUTION DE WHOSCORED =====
         if df_ratings is not None and not df_ratings.empty:

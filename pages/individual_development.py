@@ -8,6 +8,7 @@ import os
 from PIL import Image
 from pathlib import Path
 import io
+from utils.pdf_generator import generate_individual_development_report_landscape
 
 
 # --- Configuración de página ---
@@ -15,6 +16,7 @@ import io
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG_DIR = os.path.join(BASE_DIR, 'img')
 LOGO_PATH = os.path.join(IMG_DIR, 'watford_logo.png')
+BACKGROUND_COVER_PATH = os.path.join(IMG_DIR, 'Watford_portada_d.jpg')
 
 # Configuración de la página
 st.set_page_config(
@@ -712,6 +714,10 @@ elif page == "Players Profile":
 
 
     st.subheader("Summary Activities – Compared Players")
+    pdf_comparison_fig = None
+    pdf_timeline_fig = None
+    df_pdf_activities = pd.DataFrame()
+    selected_types_for_pdf = []
 
     # Load full training data
     df_all = load_training_data()
@@ -757,10 +763,10 @@ elif page == "Players Profile":
     )
 
     # --- Create grouped bar chart per player ---
-    fig = go.Figure()
+    comparison_fig = go.Figure()
 
     # Entrenamientos
-    fig.add_trace(go.Bar(
+    comparison_fig.add_trace(go.Bar(
         x=summary["Player"],
         y=summary["Entrenamientos"],
         name="Entrenamientos",
@@ -772,7 +778,7 @@ elif page == "Players Profile":
     ))
 
     # Meetings
-    fig.add_trace(go.Bar(
+    comparison_fig.add_trace(go.Bar(
         x=summary["Player"],
         y=summary["Meetings"],
         name="Meetings",
@@ -781,7 +787,7 @@ elif page == "Players Profile":
     ))
 
     # Review Clips
-    fig.add_trace(go.Bar(
+    comparison_fig.add_trace(go.Bar(
         x=summary["Player"],
         y=summary["Review_Clips"],
         name="Review Clips",
@@ -790,7 +796,7 @@ elif page == "Players Profile":
     ))
 
     # Layout tweaks
-    fig.update_layout(
+    comparison_fig.update_layout(
         barmode="group",
         xaxis_title="Jugador",
         yaxis_title="Cantidad de Actividades",
@@ -807,7 +813,8 @@ elif page == "Players Profile":
         )
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(comparison_fig, use_container_width=True)
+    pdf_comparison_fig = comparison_fig
 
     # --- Load individual activities for selected player ---
     with st.spinner('Cargando datos del jugador...'):
@@ -832,6 +839,8 @@ elif page == "Players Profile":
                 df_mostrar = df_filtrado.copy()
                 df_mostrar["fecha"] = df_mostrar["fecha"].dt.strftime("%d/%m/%Y")
                 df_mostrar = df_mostrar[["fecha", "tipo", "subtipo", "descripcion"]]
+                df_pdf_activities = df_filtrado.copy()
+                selected_types_for_pdf = list(tipos_seleccionados)
 
                 st.dataframe(
                     df_mostrar,
@@ -860,6 +869,8 @@ elif page == "Players Profile":
                 )
             else:
                 st.info("No hay actividades del tipo seleccionado.")
+                df_pdf_activities = df_filtrado.copy()
+                selected_types_for_pdf = list(tipos_seleccionados)
         else:
             st.info("No hay actividades registradas para este jugador.")
 
@@ -876,7 +887,7 @@ elif page == "Players Profile":
             if 'subtipo' in df_actividades.columns:
                 hover_columns.append('subtipo')
                 
-            fig = px.scatter(
+            timeline_fig = px.scatter(
                 df_actividades,
                 x='fecha',
                 y='tipo',
@@ -892,7 +903,7 @@ elif page == "Players Profile":
                 title=f"({fecha_inicio.strftime('%d/%m/%Y')} - {fecha_fin.strftime('%d/%m/%Y')})"
             )
             
-            fig.update_layout(
+            timeline_fig.update_layout(
                 plot_bgcolor='rgba(0,0,0,0)',
                 paper_bgcolor='rgba(0,0,0,0)',
                 xaxis_title='Fecha',
@@ -902,7 +913,119 @@ elif page == "Players Profile":
                 margin=dict(l=0, r=0, t=40, b=0)
             )
             
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(timeline_fig, use_container_width=True)
+            pdf_timeline_fig = timeline_fig
+
+        if df_pdf_activities.empty and not df_actividades.empty:
+            df_pdf_activities = df_actividades.copy()
+            selected_types_for_pdf = sorted(df_pdf_activities["tipo"].dropna().astype(str).unique().tolist())
+
+    st.markdown("---")
+    st.subheader("PDF Report")
+
+    report_signature = (
+        f"{jugador_seleccionado}|{fecha_inicio}|{fecha_fin}|"
+        f"{','.join(sorted(selected_types_for_pdf))}|{len(df_pdf_activities)}"
+    )
+    if st.session_state.get("individual_profile_pdf_signature") != report_signature:
+        st.session_state["individual_profile_pdf_signature"] = report_signature
+        st.session_state.pop("individual_profile_pdf_bytes", None)
+        st.session_state.pop("individual_profile_pdf_name", None)
+
+    if df_pdf_activities.empty:
+        st.info("No hay actividades en el rango/filtros actuales para generar el PDF.")
+    else:
+        generating_key = "individual_profile_pdf_generating"
+        if generating_key not in st.session_state:
+            st.session_state[generating_key] = False
+
+        if st.button(
+            "Generate PDF report",
+            key="generate_individual_profile_pdf",
+            type="primary",
+            disabled=st.session_state.get(generating_key, False),
+        ):
+            st.session_state[generating_key] = True
+            st.rerun()
+
+        if st.session_state.get(generating_key, False):
+            overlay_placeholder = st.empty()
+            overlay_placeholder.markdown(
+                """
+                <style>
+                  .pdf-generation-overlay {
+                    position: fixed;
+                    inset: 0;
+                    background: rgba(0, 0, 0, 0.45);
+                    z-index: 2147483000;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    pointer-events: all;
+                  }
+                  .pdf-generation-overlay-card {
+                    background: #111;
+                    color: #fff;
+                    padding: 1rem 1.25rem;
+                    border-radius: 12px;
+                    font-weight: 600;
+                    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+                  }
+                </style>
+                <div class="pdf-generation-overlay">
+                  <div class="pdf-generation-overlay-card">Generating PDF report... Please wait.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            try:
+                try:
+                    df_summary_pdf = (
+                        df_pdf_activities
+                        .groupby("tipo", dropna=False)
+                        .size()
+                        .reset_index(name="count")
+                    )
+                    df_summary_pdf["tipo"] = df_summary_pdf["tipo"].fillna("Sin tipo")
+
+                    safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(jugador_info).strip())
+                    safe_name = safe_name.strip("_") or "player"
+                    pdf_file_name = f"{safe_name}_individual_development.pdf"
+
+                    with st.spinner("Generating PDF report..."):
+                        pdf_bytes = generate_individual_development_report_landscape(
+                            player_name=jugador_info,
+                            fecha_inicio=fecha_inicio.strftime("%Y-%m-%d"),
+                            fecha_fin=fecha_fin.strftime("%Y-%m-%d"),
+                            df_actividades=df_pdf_activities,
+                            df_summary=df_summary_pdf,
+                            df_ratings=None,
+                            fig_comparison=pdf_comparison_fig,
+                            fig_timeline=pdf_timeline_fig,
+                            logo_path=LOGO_PATH,
+                            background_image_path=BACKGROUND_COVER_PATH if os.path.exists(BACKGROUND_COVER_PATH) else None,
+                        )
+
+                    if not pdf_bytes:
+                        raise ValueError("Generated PDF is empty.")
+
+                    st.session_state["individual_profile_pdf_bytes"] = pdf_bytes
+                    st.session_state["individual_profile_pdf_name"] = pdf_file_name
+                    st.success("PDF generated. Download it below.")
+                except Exception as e:
+                    st.error(f"Failed to generate PDF report: {e}")
+            finally:
+                st.session_state[generating_key] = False
+                overlay_placeholder.empty()
+
+        if st.session_state.get("individual_profile_pdf_bytes"):
+            st.download_button(
+                "Download PDF report",
+                data=st.session_state["individual_profile_pdf_bytes"],
+                file_name=st.session_state.get("individual_profile_pdf_name", "individual_development_report.pdf"),
+                mime="application/pdf",
+                key="download_individual_profile_pdf",
+            )
             
 
 # 3. Registro de Actividades
@@ -1440,4 +1563,3 @@ elif page == "Files":
                 if 'error_importacion' in st.session_state:
                     st.error(f"Ocurrió un error al procesar el archivo: {st.session_state['error_importacion']}")
                     del st.session_state['error_importacion']
-
