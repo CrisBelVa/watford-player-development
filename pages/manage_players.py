@@ -11,6 +11,7 @@ from db_utils import connect_to_db
 from player_ids import normalize_whoscored_player_id, whoscored_player_url
 from PIL import Image, ImageOps
 from typing import Optional
+from utils.sheets_client import GoogleSheetsClient
 # --- Config --------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG_DIR = os.path.join(BASE_DIR, "img")
@@ -71,25 +72,38 @@ if st.session_state.get("user_type") != "staff":
 # --- Helpers -------------------------------------------------
 PLAYERS_FILE_XLSX = os.path.join(BASE_DIR, "data", "watford_players_login_info.xlsx")
 
+@st.cache_resource(show_spinner=False)
+def get_sheets_client() -> GoogleSheetsClient:
+    return GoogleSheetsClient()
+
 @st.cache_data(show_spinner=False)
 def load_players_df(path: str) -> pd.DataFrame:
-    """Load players Excel into a DataFrame. If the file doesn't exist create an empty df.
+    """Load players DataFrame from Google Sheets (fallback local Excel).
     Ensures the columns: internal_id (str), playerName (str), playerId (string),
     internal_position (str), activo (int), photo_url (string).
     """
-    if not os.path.exists(path):
-        return pd.DataFrame(
-            columns=[INTERNAL_ID_COL, "playerName", "playerId", INTERNAL_POSITION_COL, "activo", "photo_url"]
+    df = None
+    sheets_client = get_sheets_client()
+    if sheets_client.is_configured():
+        try:
+            df = sheets_client.read_players_df()
+        except Exception as exc:
+            st.warning(f"No se pudo leer la pestaña 'Players' de Google Sheets. Usando fallback local. ({exc})")
+
+    if df is None:
+        if not os.path.exists(path):
+            return pd.DataFrame(
+                columns=[INTERNAL_ID_COL, "playerName", "playerId", INTERNAL_POSITION_COL, "activo", "photo_url"]
+            )
+        # Keep playerId as string to preserve format
+        df = pd.read_excel(
+            path,
+            converters={
+                "playerId": lambda x: str(x).strip() if pd.notna(x) else None,
+                INTERNAL_ID_COL: lambda x: str(x).strip() if pd.notna(x) else None,
+                INTERNAL_POSITION_COL: lambda x: str(x).strip() if pd.notna(x) else None,
+            },
         )
-    # Keep playerId as string to preserve format
-    df = pd.read_excel(
-        path,
-        converters={
-            "playerId": lambda x: str(x).strip() if pd.notna(x) else None,
-            INTERNAL_ID_COL: lambda x: str(x).strip() if pd.notna(x) else None,
-            INTERNAL_POSITION_COL: lambda x: str(x).strip() if pd.notna(x) else None,
-        },
-    )
     # Normalize columns
     df.columns = [str(c).strip() for c in df.columns]
     if INTERNAL_ID_COL not in df.columns:
@@ -122,10 +136,8 @@ def load_players_df(path: str) -> pd.DataFrame:
 
 
 def save_players_df(df: pd.DataFrame, path: str):
-    """Save dataframe back to Excel safely."""
+    """Save players DataFrame to Google Sheets (fallback local Excel)."""
     df = df.copy()
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     df = _ensure_internal_ids(df)
     # Ensure 'activo' column is int and only contains 0/1
     if "activo" in df.columns:
@@ -155,6 +167,17 @@ def save_players_df(df: pd.DataFrame, path: str):
     df["photo_url"] = df["photo_url"].astype("string").where(df["photo_url"].notna(), None)
     df["photo_url"] = df["photo_url"].apply(lambda x: x.strip() if isinstance(x, str) else x)
     df = df[[INTERNAL_ID_COL, "playerName", "playerId", INTERNAL_POSITION_COL, "activo", "photo_url"]]
+
+    sheets_client = get_sheets_client()
+    if sheets_client.is_configured():
+        try:
+            sheets_client.write_players_df(df)
+            return
+        except Exception as exc:
+            st.warning(f"No se pudo guardar en Google Sheets (Players). Guardando en local. ({exc})")
+
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with BytesIO() as buffer:
         df.to_excel(buffer, index=False)
         buffer.seek(0)

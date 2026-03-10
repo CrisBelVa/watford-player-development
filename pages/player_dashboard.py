@@ -19,6 +19,7 @@ from sqlalchemy import create_engine
 from pandas.io.formats.style import Styler
 import streamlit.components.v1 as components  # ✅ needed for working HTML injection
 from player_ids import normalize_whoscored_player_id, whoscored_player_url
+from utils.sheets_client import GoogleSheetsClient
 
 # Optional: helper to navigate between pages
 try:
@@ -39,6 +40,10 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+@st.cache_resource(show_spinner=False)
+def get_sheets_client() -> GoogleSheetsClient:
+    return GoogleSheetsClient()
 
 
 def _safe_pdf_filename(name: str) -> str:
@@ -153,26 +158,35 @@ components.html(
 
 def load_players_list() -> Dict[str, Dict[str, Any]]:
     """
-    Load players from data/watford_players_login_info.[xlsx|csv].
+    Load players from Google Sheets tab 'Players' (fallback local file).
     Normalizes playerId to STRING (or None) to avoid dtype issues in the UI.
     """
     try:
-        base_csv = os.path.join('data', 'watford_players_login_info.csv')
-        base_xlsx = os.path.join('data', 'watford_players_login_info.xlsx')
+        players_df = None
+        sheets_client = get_sheets_client()
+        if sheets_client.is_configured():
+            try:
+                players_df = sheets_client.read_players_df()
+            except Exception as exc:
+                st.warning(f"Could not read 'Players' from Google Sheets. Falling back to local file. ({exc})")
 
-        if os.path.exists(base_csv):
-            players_df = pd.read_csv(base_csv, dtype={"internal_id": "string", "playerId": "string"})
-        elif os.path.exists(base_xlsx):
-            players_df = pd.read_excel(
-                base_xlsx,
-                converters={
-                    "internal_id": lambda x: str(x).strip() if pd.notna(x) else None,
-                    "playerId": lambda x: str(x).strip() if pd.notna(x) else None,
-                },
-            )
-        else:
-            st.warning("No players file found. Upload CSV/XLSX with columns: playerId, playerName, activo.")
-            return {}
+        if players_df is None:
+            base_csv = os.path.join('data', 'watford_players_login_info.csv')
+            base_xlsx = os.path.join('data', 'watford_players_login_info.xlsx')
+
+            if os.path.exists(base_csv):
+                players_df = pd.read_csv(base_csv, dtype={"internal_id": "string", "playerId": "string"})
+            elif os.path.exists(base_xlsx):
+                players_df = pd.read_excel(
+                    base_xlsx,
+                    converters={
+                        "internal_id": lambda x: str(x).strip() if pd.notna(x) else None,
+                        "playerId": lambda x: str(x).strip() if pd.notna(x) else None,
+                    },
+                )
+            else:
+                st.warning("No players source found. Configure Google Sheets tab 'Players' or local CSV/XLSX.")
+                return {}
 
         players_df.columns = [str(c).strip() for c in players_df.columns]
         if "internal_id" not in players_df.columns:
@@ -223,7 +237,7 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
         return players
 
     except Exception as e:
-        st.error(f"❌ Error loading players list: {e}")
+        st.error(f"❌ Error loading players source: {e}")
         import traceback
         st.error(traceback.format_exc())
         return {}

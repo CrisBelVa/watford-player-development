@@ -9,6 +9,7 @@ from PIL import Image
 from pathlib import Path
 import io
 from utils.pdf_generator import generate_individual_development_report_landscape
+from utils.sheets_client import GoogleSheetsClient
 
 
 # --- Configuración de página ---
@@ -17,6 +18,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG_DIR = os.path.join(BASE_DIR, 'img')
 LOGO_PATH = os.path.join(IMG_DIR, 'watford_logo.png')
 BACKGROUND_COVER_PATH = os.path.join(IMG_DIR, 'Watford_portada_d.jpg')
+LOCAL_TRAINING_FILE = Path(BASE_DIR) / "data" / "Individuals - Training.xlsx"
 
 # Configuración de la página
 st.set_page_config(
@@ -41,6 +43,95 @@ def load_logo():
         return None
 
 logo = load_logo()
+
+@st.cache_resource(show_spinner=False)
+def get_sheets_client() -> GoogleSheetsClient:
+    return GoogleSheetsClient()
+
+def _read_local_training_file() -> pd.DataFrame:
+    if not LOCAL_TRAINING_FILE.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_excel(LOCAL_TRAINING_FILE, header=1)
+    except Exception:
+        return pd.read_excel(LOCAL_TRAINING_FILE, header=0)
+
+def _load_sessions_raw_df() -> pd.DataFrame:
+    sheets_client = get_sheets_client()
+    if sheets_client.is_configured():
+        try:
+            return sheets_client.read_sessions_df()
+        except Exception as exc:
+            st.warning(f"No se pudo leer la pestaña 'Sesions' de Google Sheets. Usando fallback local. ({exc})")
+    return _read_local_training_file()
+
+def _normalize_sessions_df(raw_df: pd.DataFrame) -> pd.DataFrame:
+    base_columns = ["Date", "Player", "Training_Type", "Meeting", "Review_Clips"]
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(columns=base_columns)
+
+    df = raw_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    normalized_map = {
+        col: (
+            str(col)
+            .strip()
+            .lower()
+            .replace("_", " ")
+            .replace("-", " ")
+            .replace("  ", " ")
+        )
+        for col in df.columns
+    }
+
+    def pick_col(candidates):
+        for cand in candidates:
+            cand_l = cand.lower()
+            for original, normalized in normalized_map.items():
+                if normalized == cand_l:
+                    return original
+        return None
+
+    date_col = pick_col(["date", "mes", "fecha"])
+    player_col = pick_col(["player", "jugador"])
+    training_col = pick_col(["individual training", "training type", "training"])
+    meeting_col = pick_col(["meeting", "reunion", "meeting type"])
+    review_col = pick_col(["review clips", "review clips ", "review", "review clip"])
+
+    # Fallback by position for legacy files.
+    if date_col is None and len(df.columns) > 0:
+        date_col = df.columns[0]
+    if player_col is None and len(df.columns) > 1:
+        player_col = df.columns[1]
+    if training_col is None and len(df.columns) > 2:
+        training_col = df.columns[2]
+    if meeting_col is None and len(df.columns) > 3:
+        meeting_col = df.columns[3]
+    if review_col is None and len(df.columns) > 4:
+        review_col = df.columns[4]
+
+    out = pd.DataFrame(columns=base_columns)
+    out["Date"] = df[date_col] if date_col in df.columns else None
+    out["Player"] = df[player_col] if player_col in df.columns else None
+    out["Training_Type"] = df[training_col] if training_col in df.columns else None
+    out["Meeting"] = df[meeting_col] if meeting_col in df.columns else None
+    out["Review_Clips"] = df[review_col] if review_col in df.columns else None
+    return out
+
+def _save_sessions_raw_df(df_to_save: pd.DataFrame) -> str:
+    sheets_client = get_sheets_client()
+    if sheets_client.is_configured():
+        try:
+            sheets_client.write_sessions_df(df_to_save)
+            return "Google Sheets / Sesions"
+        except Exception as exc:
+            st.warning(f"No se pudo guardar en Google Sheets (Sesions). Guardando en local. ({exc})")
+
+    LOCAL_TRAINING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(LOCAL_TRAINING_FILE, engine="openpyxl") as writer:
+        df_to_save.to_excel(writer, index=False)
+    return str(LOCAL_TRAINING_FILE)
 
 # --- Estilos CSS personalizados ---
 st.markdown("""
@@ -73,31 +164,13 @@ st.markdown("""
 # --- Funciones para cargar datos ---
 @st.cache_data(ttl=3600)
 def load_training_data():
-    """Carga y preprocesa los datos de entrenamiento desde el archivo Excel."""
+    """Carga y preprocesa los datos de entrenamiento desde Sheets/archivo local."""
     try:
-        # Ruta al archivo de entrenamiento
-        data_dir = Path(BASE_DIR) / 'data'
-        file_path = data_dir / 'Individuals - Training.xlsx'
-        
-        # Cargar el archivo Excel omitiendo la primera fila (nombre del jugador)
-        df = pd.read_excel(file_path, header=1)
-        
-        # Renombrar columnas para mejor manejo
-        df.columns = [str(col).strip() for col in df.columns]
-        
-        # Verificar que las columnas esperadas existen
-        if len(df.columns) < 5:
-            st.error("El archivo Excel no tiene el formato esperado. Se esperan al menos 5 columnas.")
-            return pd.DataFrame()
-        
-        # Renombrar columnas a nombres más manejables
-        df = df.rename(columns={
-            df.columns[0]: 'Date',
-            df.columns[1]: 'Player',
-            df.columns[2]: 'Training_Type',
-            df.columns[3]: 'Meeting',
-            df.columns[4]: 'Review_Clips'
-        })
+        raw_df = _load_sessions_raw_df()
+        df = _normalize_sessions_df(raw_df)
+
+        if df.empty:
+            return df
         
         # Eliminar filas sin fecha o con fecha inválida
         df = df[df['Date'].notna()]
@@ -1034,18 +1107,21 @@ elif page == "Files":
     st.write("Registra nuevas actividades de desarrollo individual para los jugadores.")
     
     
-    # Show download button for the dashboard data file
-    data_dir = Path(BASE_DIR) / 'data'
-    dashboard_file_path = data_dir / 'Individuals - Training.xlsx'
-    
-    if dashboard_file_path.exists():
-        with open(dashboard_file_path, "rb") as f:
-            st.download_button(
-                label="📥 Descargar archivo de datos actual",
-                data=f,
-                file_name="Individuals - Training.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+    # Descargar snapshot actual (desde Google Sheets / Sesions o fallback local)
+    current_sessions_df = _load_sessions_raw_df()
+    if not current_sessions_df.empty:
+        download_buffer = io.BytesIO()
+        with pd.ExcelWriter(download_buffer, engine="openpyxl") as writer:
+            current_sessions_df.to_excel(writer, index=False, sheet_name="Sesions")
+        download_buffer.seek(0)
+        st.download_button(
+            label="📥 Descargar datos actuales",
+            data=download_buffer.getvalue(),
+            file_name="Individuals-Training.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.info("No hay datos actuales en la fuente de sesiones.")
 
 
     # Función para validar y cargar el archivo Excel específico
@@ -1272,6 +1348,8 @@ elif page == "Files":
                 st.markdown(error_msg, unsafe_allow_html=True)
                 return False, "No se pudieron procesar las actividades. Verifica el formato del archivo."
             
+            # Guardar dataset tabular validado para subirlo a la pestaña Sesions.
+            st.session_state["training_import_raw_df"] = df.copy()
             return True, df_actividades
             
         except Exception as e:
@@ -1352,6 +1430,8 @@ elif page == "Files":
                             st.session_state['archivo_validado'] = es_valido
                             st.session_state['resultado_validacion'] = resultado
                             st.session_state['archivo_cargado'] = uploaded_file
+                            if not es_valido:
+                                st.session_state['training_import_raw_df'] = None
                             
                             # Si hay un error de validación, mostrarlo
                             if not es_valido and isinstance(resultado, str):
@@ -1362,6 +1442,7 @@ elif page == "Files":
                             st.error(f"❌ Error inesperado al validar el archivo: {str(e)}")
                             st.session_state['archivo_validado'] = False
                             st.session_state['resultado_validacion'] = str(e)
+                            st.session_state['training_import_raw_df'] = None
                 
                 # Si ya se validó el archivo, mostrar los resultados
                 if st.session_state.get('archivo_validado', False):
@@ -1407,131 +1488,56 @@ elif page == "Files":
                     with col1:
                         if st.button("✅ Confirmar Importación", type="primary", key="confirmar_importacion"):
                             try:
-                                import os
-                                import shutil
-                                from datetime import datetime
-                                
-                                # Obtener los datos de la sesión
-                                uploaded_file = st.session_state['archivo_cargado']
-                                
                                 st.info("Procesando la importación, por favor espere...")
-                                
-                                # Ruta al directorio data (un nivel arriba del directorio actual)
-                                data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data'))
-                                os.makedirs(data_dir, exist_ok=True)
-                                
-                                # Ruta completa del archivo de destino
-                                file_path = os.path.join(data_dir, 'Individuals - Training.xlsx')
-                                
-                                # Crear archivo temporal primero
-                                temp_path = os.path.join(data_dir, 'temp_training.xlsx')
-                                
-                                # Reiniciar el puntero del archivo uploaded
-                                uploaded_file.seek(0)
-                                
-                                # Guardar primero en archivo temporal
-                                with open(temp_path, 'wb') as f:
-                                    f.write(uploaded_file.getvalue())
-                                
-                                # Verificar que el archivo temporal se guardó correctamente
-                                if not os.path.exists(temp_path):
-                                    st.error("❌ Error: No se pudo crear el archivo temporal.")
-                                    raise Exception("No se pudo crear el archivo temporal")
-                                
-                                # Si existe el archivo original, crear backup
-                                backup_path = None
-                                if os.path.exists(file_path):
-                                    backup_path = os.path.join(data_dir, f'backup_training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx')
-                                    shutil.copy2(file_path, backup_path)
-                                    st.info(f"✓ Backup creado: {os.path.basename(backup_path)}")
-                                
-                                # Mover el archivo temporal al destino final
-                                shutil.move(temp_path, file_path)
-                                
-                                # Verificar que el archivo se movió correctamente
-                                if os.path.exists(file_path):
-                                    file_size = os.path.getsize(file_path) / 1024  # Tamaño en KB
-                                    st.success(f"✅ ¡Archivo guardado exitosamente!")
-                                    st.success(f"   📁 Ubicación: {file_path}")
-                                    st.success(f"   📊 Tamaño: {file_size:.1f} KB")
-                                    
-                                    # Limpiar el caché de Streamlit
-                                    st.cache_data.clear()
-                                    
-                                    # Limpiar cachés específicos
-                                    if 'load_training_data' in globals():
-                                        load_training_data.clear()
-                                    if 'get_current_month_metrics' in globals():
-                                        get_current_month_metrics.clear()
-                                    if 'get_monthly_summary' in globals():
-                                        get_monthly_summary.clear()
-                                    if 'get_players_summary' in globals():
-                                        get_players_summary.clear()
-                                    
-                                    st.success("✅ ¡Caché actualizado! Los nuevos datos estarán disponibles.")
-                                    
-                                    # Mostrar opción para descargar un reporte
-                                    csv = resultado.to_csv(index=False).encode('utf-8')
-                                    st.download_button(
-                                        label="📥 Descargar Reporte en CSV",
-                                        data=csv,
-                                        file_name=f"reporte_actividades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                        mime='text/csv',
-                                        help="Descargar un reporte detallado de las actividades importadas"
-                                    )
-                                    
-                                    # Mensaje para refrescar la página
-                                    st.info("💡 **Sugerencia:** Refresca la página o navega a otra sección para ver los nuevos datos reflejados en el dashboard.")
-                                    
-                                    # Limpiar el estado de la sesión para permitir nueva carga
-                                    st.session_state['archivo_validado'] = False
-                                    st.session_state['resultado_validacion'] = None
-                                    st.session_state['archivo_cargado'] = None
-                                    
-                                    # Mostrar mensaje de éxito y botón para cargar otro archivo
-                                    st.success("✅ ¡Importación completada con éxito!")
-                                    if st.button("🔄 Cargar otro archivo", key="cargar_otro_archivo"):
-                                        # Limpiar el estado y forzar recarga
-                                        st.session_state.clear()
-                                        st.rerun()
-                                    
-                                    # Detener la ejecución para mostrar el mensaje de éxito
-                                    st.stop()
-                                    
-                                else:
-                                    st.error("❌ Error: No se pudo verificar el archivo guardado.")
-                                    # Restaurar backup si existe
-                                    if backup_path and os.path.exists(backup_path):
-                                        shutil.copy2(backup_path, file_path)
-                                        st.info("✓ Archivo original restaurado desde backup.")
-                                
+                                raw_df_to_save = st.session_state.get("training_import_raw_df")
+
+                                if raw_df_to_save is None or raw_df_to_save.empty:
+                                    uploaded_file = st.session_state.get("archivo_cargado")
+                                    if uploaded_file is None:
+                                        raise ValueError("No hay archivo validado para importar.")
+                                    uploaded_file.seek(0)
+                                    raw_df_to_save = pd.read_excel(uploaded_file)
+
+                                destination = _save_sessions_raw_df(raw_df_to_save)
+                                st.success(f"✅ ¡Datos guardados exitosamente en {destination}!")
+
+                                # Limpiar cachés específicos
+                                if 'load_training_data' in globals():
+                                    load_training_data.clear()
+                                if 'get_current_month_metrics' in globals():
+                                    get_current_month_metrics.clear()
+                                if 'get_monthly_summary' in globals():
+                                    get_monthly_summary.clear()
+                                if 'get_players_summary' in globals():
+                                    get_players_summary.clear()
+
+                                # Mostrar opción para descargar un reporte
+                                csv = resultado.to_csv(index=False).encode('utf-8')
+                                st.download_button(
+                                    label="📥 Descargar Reporte en CSV",
+                                    data=csv,
+                                    file_name=f"reporte_actividades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                    mime='text/csv',
+                                    help="Descargar un reporte detallado de las actividades importadas"
+                                )
+
+                                st.session_state['archivo_validado'] = False
+                                st.session_state['resultado_validacion'] = None
+                                st.session_state['archivo_cargado'] = None
+                                st.session_state['training_import_raw_df'] = None
+                                st.success("✅ ¡Importación completada con éxito!")
+
                             except Exception as e:
-                                st.error(f"❌ Error al guardar el archivo: {str(e)}")
+                                st.error(f"❌ Error al guardar la importación: {str(e)}")
                                 import traceback
                                 st.text(traceback.format_exc())
-                                
-                                # Limpiar archivo temporal si existe
-                                if 'temp_path' in locals() and os.path.exists(temp_path):
-                                    try:
-                                        os.remove(temp_path)
-                                    except:
-                                        pass
-                                
-                                # Restaurar backup si existe
-                                if 'backup_path' in locals() and backup_path and os.path.exists(backup_path):
-                                    try:
-                                        if os.path.exists(file_path):
-                                            os.remove(file_path)
-                                        shutil.copy2(backup_path, file_path)
-                                        st.info("✓ Archivo original restaurado desde backup después del error.")
-                                    except Exception as restore_error:
-                                        st.error(f"Error al restaurar el backup: {str(restore_error)}")
                     
                     with col2:
                         if st.button("❌ Cancelar", key="cancelar_importacion"):
                             st.session_state['archivo_validado'] = False
                             st.session_state['resultado_validacion'] = None
                             st.session_state['archivo_cargado'] = None
+                            st.session_state['training_import_raw_df'] = None
                             st.rerun()
                 
                 # Mostrar mensaje de error si la validación falló

@@ -6,6 +6,7 @@ import base64
 from io import BytesIO
 from db_utils import connect_to_db, load_player_data  # Your db functions
 from player_ids import normalize_whoscored_player_id
+from utils.sheets_client import GoogleSheetsClient
 
 # --- Page settings ---
 import os
@@ -26,45 +27,61 @@ st.set_page_config(
 # Master password for Player login (can be overridden via env var)
 MASTER_PASSWORD = os.environ.get("PLAYER_MASTER_PASSWORD", "admin123")
 
-# --- Load Players from local CSV/XLSX for login (Players role) ---
+@st.cache_resource(show_spinner=False)
+def get_sheets_client() -> GoogleSheetsClient:
+    return GoogleSheetsClient()
+
+# --- Load Players from Google Sheets (fallback local CSV/XLSX) ---
 @st.cache_data(ttl=600)
 def load_players_for_login():
     """
-    Loads players from data/watford_players_login_info.[xlsx|csv]
+    Loads players from Google Sheets tab 'Players' (fallback local files)
     - Filters only activo == 1
     - Normalizes columns: internal_id (string), playerId (string), playerName (string), activo (int)
     - Keeps only players that have WhoScored `playerId` for player login
     Returns a DataFrame with at least these columns.
     """
     try:
-        candidate_paths = [
-            os.path.join(DATA_DIR, "watford_players_login_info.csv"),
-            os.path.join(DATA_DIR, "watford_players_login_info.xlsx"),
-            os.path.join(BASE_DIR, "watford_players_login_info.csv"),
-            os.path.join(BASE_DIR, "watford_players_login_info.xlsx"),
-            os.path.join("data", "watford_players_login_info.csv"),
-            os.path.join("data", "watford_players_login_info.xlsx"),
-            "watford_players_login_info.csv",
-            "watford_players_login_info.xlsx",
-        ]
+        df = None
+        sheets_client = get_sheets_client()
+        if sheets_client.is_configured():
+            try:
+                df = sheets_client.read_players_df()
+            except Exception as exc:
+                st.warning(f"Could not read Players from Google Sheets. Falling back to local file. ({exc})")
 
-        existing = [p for p in candidate_paths if os.path.exists(p)]
-        if not existing:
-            st.error("Players file not found. Please add watford_players_login_info.xlsx or CSV.")
-            return pd.DataFrame(columns=["internal_id", "playerId", "playerName", "activo"])
+        if df is None:
+            candidate_paths = [
+                os.path.join(DATA_DIR, "watford_players_login_info.csv"),
+                os.path.join(DATA_DIR, "watford_players_login_info.xlsx"),
+                os.path.join(BASE_DIR, "watford_players_login_info.csv"),
+                os.path.join(BASE_DIR, "watford_players_login_info.xlsx"),
+                os.path.join("data", "watford_players_login_info.csv"),
+                os.path.join("data", "watford_players_login_info.xlsx"),
+                "watford_players_login_info.csv",
+                "watford_players_login_info.xlsx",
+            ]
 
-        file_path = existing[0]
-        if file_path.lower().endswith(".csv"):
-            df = pd.read_csv(file_path, dtype={"internal_id": "string", "playerId": "string"})
-        else:
-            # Keep playerId as string to preserve any leading zeros
-            df = pd.read_excel(
-                file_path,
-                converters={
-                    "internal_id": lambda x: str(x).strip() if pd.notna(x) else None,
-                    "playerId": lambda x: str(x).strip() if pd.notna(x) else None,
-                },
-            )
+            existing = [p for p in candidate_paths if os.path.exists(p)]
+            if not existing:
+                st.error(
+                    "Players source not found. Configure Google Sheets (tab 'Players') "
+                    "or add watford_players_login_info.xlsx/CSV locally."
+                )
+                return pd.DataFrame(columns=["internal_id", "playerId", "playerName", "activo"])
+
+            file_path = existing[0]
+            if file_path.lower().endswith(".csv"):
+                df = pd.read_csv(file_path, dtype={"internal_id": "string", "playerId": "string"})
+            else:
+                # Keep playerId as string to preserve any leading zeros
+                df = pd.read_excel(
+                    file_path,
+                    converters={
+                        "internal_id": lambda x: str(x).strip() if pd.notna(x) else None,
+                        "playerId": lambda x: str(x).strip() if pd.notna(x) else None,
+                    },
+                )
 
         # Normalize columns
         df.columns = [str(c).strip() for c in df.columns]
@@ -109,7 +126,7 @@ def load_players_for_login():
 
         return df
     except Exception as e:
-        st.error(f"Error loading players file: {e}")
+        st.error(f"Error loading players source: {e}")
         return pd.DataFrame(columns=["internal_id", "playerId", "playerName", "activo"]) 
 
 # --- Load Staff Users ---
@@ -192,7 +209,7 @@ if not st.session_state.logged_in:
         if role == "Player":
             players_df = load_players_for_login()
             if players_df.empty:
-                st.warning("No active players with WhoScored ID available. Please update data/watford_players_login_info.xlsx.")
+                st.warning("No active players with WhoScored ID available. Please update tab 'Players' in Google Sheets.")
             else:
                 name_to_id = {row['playerName']: row['playerId'] for _, row in players_df.iterrows()}
                 player_options = sorted(list(name_to_id.keys()), key=lambda s: s.lower())

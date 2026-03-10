@@ -37,6 +37,7 @@ env/
 
 # Archivos de configuración local
 *.local
+service_account.json
 
 # Archivos de Streamlit
 .streamlit/

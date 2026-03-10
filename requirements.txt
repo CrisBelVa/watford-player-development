@@ -14,3 +14,5 @@ kaleido
 pdfkit
 wkhtmltopdf
 openpyxl
+gspread
+google-auth

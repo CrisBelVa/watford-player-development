@@ -18,6 +18,7 @@ from typing import Tuple, Dict, Any
 from sqlalchemy import create_engine
 from pandas.io.formats.style import Styler
 from player_ids import normalize_whoscored_player_id, whoscored_player_url
+from utils.sheets_client import GoogleSheetsClient
 # Optional: helper to navigate between pages
 try:
     from streamlit_extras.switch_page_button import switch_page
@@ -38,6 +39,10 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+@st.cache_resource(show_spinner=False)
+def get_sheets_client() -> GoogleSheetsClient:
+    return GoogleSheetsClient()
+
 # Verificar autenticación
 if "logged_in" not in st.session_state or not st.session_state.logged_in:
     st.warning("You must be logged in to view this page.")
@@ -50,25 +55,34 @@ is_staff = st.session_state.user_type == "staff"
 
 def load_players_list() -> Dict[str, Dict[str, Any]]:
     """
-    Load players from data/watford_players_login_info.[xlsx|csv].
+    Load players from Google Sheets tab 'Players' (fallback local files).
     Expected columns (preferred): playerId, playerName, activo
     Falls back gracefully if playerId is missing.
     Returns a dict keyed by a staff-facing label, with values containing id and name.
     """
     try:
-        base_csv = os.path.join('data', 'watford_players_login_info.csv')
-        base_xlsx = os.path.join('data', 'watford_players_login_info.xlsx')
+        players_df = None
+        sheets_client = get_sheets_client()
+        if sheets_client.is_configured():
+            try:
+                players_df = sheets_client.read_players_df()
+            except Exception as exc:
+                st.warning(f"Could not read 'Players' from Google Sheets. Falling back to local file. ({exc})")
 
-        if os.path.exists(base_csv):
-            players_df = pd.read_csv(base_csv, dtype={"playerId": "string"})
-        elif os.path.exists(base_xlsx):
-            players_df = pd.read_excel(
-                base_xlsx,
-                converters={"playerId": lambda x: str(x).strip() if pd.notna(x) else None},
-            )
-        else:
-            st.warning("No players file found. Please upload a file (CSV or XLSX) with columns like playerId, playerName, activo.")
-            return {}
+        if players_df is None:
+            base_csv = os.path.join('data', 'watford_players_login_info.csv')
+            base_xlsx = os.path.join('data', 'watford_players_login_info.xlsx')
+
+            if os.path.exists(base_csv):
+                players_df = pd.read_csv(base_csv, dtype={"playerId": "string"})
+            elif os.path.exists(base_xlsx):
+                players_df = pd.read_excel(
+                    base_xlsx,
+                    converters={"playerId": lambda x: str(x).strip() if pd.notna(x) else None},
+                )
+            else:
+                st.warning("No players source found. Configure tab 'Players' in Google Sheets or upload local file.")
+                return {}
 
         # Normalize column names
         players_df.columns = [c.strip() for c in players_df.columns]
@@ -180,13 +194,18 @@ def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
                 try:
                     if uploaded_file.name.endswith('.csv'):
                         up_df = pd.read_csv(uploaded_file)
-                        out_path = os.path.join('data', 'watford_players_login_info.csv')
-                        up_df.to_csv(out_path, index=False)
                     else:
                         up_df = pd.read_excel(uploaded_file)
+
+                    sheets_client = get_sheets_client()
+                    if sheets_client.is_configured():
+                        sheets_client.write_players_df(up_df)
+                        out_path = "Google Sheets / Players"
+                    else:
                         out_path = os.path.join('data', 'watford_players_login_info.xlsx')
                         up_df.to_excel(out_path, index=False)
-                    st.success(f"Players file saved to {out_path}")
+
+                    st.success(f"Players data saved to {out_path}")
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ Error saving file: {e}")
