@@ -144,10 +144,10 @@ class WatfordPlayerReport(FPDF):
         self.cell(0, 10, str(season), 0, 1, 'L')
         self.ln(3)
         
-        # Delta Range (BLANCO)
+        # Main Range (BLANCO)
         self.set_font('Arial', 'B', 14)
         self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
-        self.cell(60, 10, 'Delta Range:', 0, 0, 'L')
+        self.cell(60, 10, 'Main Range:', 0, 0, 'L')
         self.set_font('Arial', '', 14)
         delta_start = filters_data.get('delta_start_date', filters_data.get('start_date', 'N/A'))
         delta_end = filters_data.get('delta_end_date', filters_data.get('end_date', 'N/A'))
@@ -156,6 +156,19 @@ class WatfordPlayerReport(FPDF):
         if isinstance(delta_end, pd.Timestamp):
             delta_end = delta_end.strftime('%Y-%m-%d')
         self.cell(0, 10, f'{delta_start} to {delta_end}', 0, 1, 'L')
+        self.ln(3)
+
+        # Comparison Mode (BLANCO)
+        self.set_font('Arial', 'B', 14)
+        self.set_text_color(*self.COLOR_WHITE)
+        self.cell(60, 10, 'Comparison:', 0, 0, 'L')
+        self.set_font('Arial', '', 14)
+        comparison_mode = filters_data.get('comparison_mode', 'Previous month')
+        comparison_value = filters_data.get('comparison_value', '')
+        comparison_text = str(comparison_mode)
+        if comparison_value:
+            comparison_text = f"{comparison_text} ({comparison_value})"
+        self.cell(0, 10, comparison_text, 0, 1, 'L')
         self.ln(3)
 
         # Reference Range (BLANCO)

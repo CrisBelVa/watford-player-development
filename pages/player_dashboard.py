@@ -9,7 +9,6 @@ import base64
 import os
 import datetime
 from sqlalchemy import text
-from datetime import timedelta
 from PIL import Image
 from db_utils import connect_to_db, load_player_data, load_event_data_for_matches, get_player_position, process_player_metrics
 from db_utils import get_all_players, process_player_comparison_metrics
@@ -545,6 +544,43 @@ metric_labels = {
      "goals_conceded": "Goals Conceded"
 }
 
+# KPI glossary text shown in the KPI selector info popup
+metric_definitions = {
+    "pass_completion_pct": "Percentage of completed passes out of total passes.",
+    "key_passes": "Passes that directly create a teammate shot attempt.",
+    "aerial_duel_pct": "Percentage of aerial duels won.",
+    "take_on_success_pct": "Percentage of successful dribbles/take-ons.",
+    "goal_creating_actions": "Actions that directly lead to a goal.",
+    "shot_creating_actions": "Actions that directly lead to a shot.",
+    "shots_on_target_pct": "Percentage of shots that are on target.",
+    "passes_into_penalty_area": "Completed passes played into the penalty area.",
+    "carries_into_final_third": "Ball carries that enter the final third.",
+    "carries_into_penalty_area": "Ball carries that enter the penalty area.",
+    "goals": "Total goals scored.",
+    "assists": "Total assists provided.",
+    "xG": "Expected goals based on shot quality.",
+    "xA": "Expected assists based on chance creation quality.",
+    "ps_xG": "Post-shot expected goals based on shot placement and power.",
+    "recoveries": "Times the player regains possession for their team.",
+    "interceptions": "Passes/interactions stopped by anticipating play.",
+    "clearances": "Defensive actions that remove danger from the area.",
+    "crosses": "Crosses attempted into attacking areas.",
+    "long_pass_pct": "Percentage of successful long passes.",
+    "progressive_passes": "Forward passes that significantly move play toward goal.",
+    "progressive_carry_distance": "Distance advanced while carrying the ball forward.",
+    "totalSaves": "Total goalkeeper saves.",
+    "claimsHigh": "High balls claimed/caught by the goalkeeper.",
+    "collected": "Loose balls collected safely by the goalkeeper.",
+    "def_actions_outside_box": "Goalkeeper defensive actions outside the penalty area.",
+    "throwin_accuracy_pct": "Percentage of accurate throw-ins.",
+    "tackle_success_pct": "Percentage of tackles won.",
+    "shotsBlocked": "Shots blocked by the player.",
+    "shotsOffTarget": "Shots taken that miss the target.",
+    "shotsOnPost": "Shots that hit the post or crossbar.",
+    "save_pct": "Percentage of shots on target faced that are saved.",
+    "goals_conceded": "Goals allowed by the team while this player is in goal.",
+}
+
 # Metric type: affects delta logic
 metric_type_map = {
     "pass_completion_pct": "percentage",
@@ -626,10 +662,21 @@ percentage_formula_map = {
     }
 
 # Get the metrics player position
+position_default_kpis_raw = position_kpi_map.get(player_position, [])
+available_kpis = [k for k in metric_labels.keys() if k in metrics_summary.columns]
+position_default_kpis = [k for k in position_default_kpis_raw if k in available_kpis]
+if position_default_kpis_raw and not position_default_kpis:
+    st.warning(f"Default KPIs for position '{player_position}' are not available in this dataset.")
+elif not position_default_kpis_raw:
+    st.warning(f"No default KPIs found for position: {player_position}.")
 
-selected_kpis = position_kpi_map.get(player_position, [])
-if not selected_kpis:
-    st.error(f"⚠️ No KPIs found for position: {player_position}")
+all_kpi_options = []
+for kpi in position_default_kpis + available_kpis:
+    if kpi not in all_kpi_options:
+        all_kpi_options.append(kpi)
+
+if not all_kpi_options:
+    all_kpi_options = [k for k in metric_type_map.keys() if k in metrics_summary.columns]
 
 
 # ---------------------------
@@ -896,9 +943,9 @@ if non_null_rate == 0:
     st.stop()
 
 # ------------------------------
-# Sidebar: Season (on top) + Time (both roles)
+# Main area: Season + Time + fixed comparison + KPI selection
 # ------------------------------
-st.sidebar.header("Season & Time Filters")
+st.markdown("### Filters")
 
 # 1) Season selector (only if season exists)
 if "season" in metrics_summary.columns:
@@ -913,7 +960,7 @@ if "season" in metrics_summary.columns:
     )
     # Prefer most recent as default if you like; here we keep "All seasons".
     season_options = ["All seasons"] + seasons
-    season_choice = st.sidebar.selectbox("Season", options=season_options, index=0)
+    season_choice = st.selectbox("Season", options=season_options, index=0)
     if season_choice == "All seasons":
         st.session_state.selected_season = None   # means no explicit season filter
     else:
@@ -946,6 +993,11 @@ def clamp_date_range(value, min_bound, max_bound):
     end = max(min_bound, min(end, max_bound))
     return (start, end) if start <= end else (min_bound, max_bound)
 
+delta_match_ids = set()
+reference_match_ids = set()
+comparison_mode_label = "Previous month"
+comparison_value_label = "1 month"
+
 if valid_dates.empty:
     st.warning("No dated matches available to build time filters. Showing all data.")
     today = pd.Timestamp.today().date()
@@ -958,13 +1010,13 @@ else:
     min_date = valid_dates.min().date()
     max_date = valid_dates.max().date()
 
-    st.sidebar.markdown("**1) Analysis Window**")
+    st.markdown("**1) Analysis Window**")
     analysis_default = clamp_date_range(
         st.session_state.get("analysis_date_range", (min_date, max_date)),
         min_date,
         max_date,
     )
-    picked_analysis = st.sidebar.date_input(
+    picked_analysis = st.date_input(
         "Analysis date range",
         value=analysis_default,
         min_value=min_date,
@@ -980,7 +1032,7 @@ else:
     )
     analysis_filtered = season_filtered.loc[analysis_mask].copy()
 
-    st.sidebar.caption(
+    st.caption(
         f"Analysis matches: {int(analysis_filtered['matchId'].nunique()) if 'matchId' in analysis_filtered.columns else 0}"
     )
 
@@ -991,99 +1043,118 @@ else:
         filtered_df = analysis_filtered.copy()
         reference_filtered_df = analysis_filtered.copy()
     else:
-        analysis_dates = analysis_filtered["matchDate"].dropna()
-        range_min_date = analysis_dates.min().date()
-        range_max_date = analysis_dates.max().date()
+        st.markdown("**2) Comparison period**")
+        st.caption("Comparison is always against the previous calendar month.")
+        # Main stats use the full selected analysis window.
+        filtered_df = analysis_filtered.sort_values("matchDate").copy()
+        delta_start_date = analysis_start_date
+        delta_end_date = analysis_end_date
+        delta_match_ids = set(filtered_df["matchId"].dropna().tolist())
 
-        st.sidebar.markdown("**2) Delta (periodo a evaluar)**")
-        st.sidebar.caption("Primero selecciona el periodo objetivo.")
-        delta_default = clamp_date_range(
-            st.session_state.get("delta_date_range", (range_min_date, range_max_date)),
-            range_min_date,
-            range_max_date,
-        )
-        picked_delta = st.sidebar.date_input(
-            "Delta date range",
-            value=delta_default,
-            min_value=range_min_date,
-            max_value=range_max_date,
-            key="delta_date_range",
-        )
-        delta_start_date, delta_end_date = clamp_date_range(picked_delta, range_min_date, range_max_date)
+        analysis_end_ts = pd.Timestamp(analysis_end_date)
+        reference_filtered_df = season_filtered.iloc[0:0].copy()
+        comparison_mode_label = "Previous month"
+        comparison_value_label = "1 month"
+        current_month_start = analysis_end_ts.to_period("M").start_time.normalize()
+        ref_start_ts = (current_month_start - pd.DateOffset(months=1)).normalize()
+        ref_end_ts = (current_month_start - pd.Timedelta(days=1)).normalize()
+        reference_filtered_df = season_filtered[
+            (season_filtered["matchDate"] >= ref_start_ts) &
+            (season_filtered["matchDate"] <= ref_end_ts)
+        ].copy()
 
-        st.sidebar.markdown("**3) Reference (baseline de comparación)**")
-        reference_mode = st.sidebar.radio(
-            "Cómo definir la Reference",
-            options=["Auto: periodo previo (misma duración)", "Manual"],
-            index=0,
-            key="reference_mode",
-        )
-
-        if reference_mode.startswith("Auto"):
-            delta_days = (delta_end_date - delta_start_date).days
-            auto_reference_end = delta_start_date - timedelta(days=1)
-            auto_reference_start = auto_reference_end - timedelta(days=delta_days)
-
-            if auto_reference_end < range_min_date:
-                st.sidebar.warning("No hay periodo previo dentro del Analysis Window. Ajusta Delta o usa Manual.")
-                reference_start_date, reference_end_date = delta_start_date, delta_end_date
-            else:
-                reference_start_date, reference_end_date = clamp_date_range(
-                    (auto_reference_start, auto_reference_end),
-                    range_min_date,
-                    range_max_date,
-                )
-
-            st.sidebar.date_input(
-                "Reference date range (auto)",
-                value=(reference_start_date, reference_end_date),
-                min_value=range_min_date,
-                max_value=range_max_date,
-                disabled=True,
-            )
-        else:
-            reference_default = clamp_date_range(
-                st.session_state.get("reference_date_range", (range_min_date, range_max_date)),
-                range_min_date,
-                range_max_date,
-            )
-            picked_reference = st.sidebar.date_input(
-                "Reference date range",
-                value=reference_default,
-                min_value=range_min_date,
-                max_value=range_max_date,
-                key="reference_date_range",
-            )
-            reference_start_date, reference_end_date = clamp_date_range(picked_reference, range_min_date, range_max_date)
-
-        # 3) Apply Delta/Reference filters only inside the Analysis window
-        delta_mask = (
-            analysis_filtered["matchDate"].dt.date >= delta_start_date
-        ) & (
-            analysis_filtered["matchDate"].dt.date <= delta_end_date
-        )
-        reference_mask = (
-            analysis_filtered["matchDate"].dt.date >= reference_start_date
-        ) & (
-            analysis_filtered["matchDate"].dt.date <= reference_end_date
-        )
-
-        filtered_df = analysis_filtered.loc[delta_mask].copy()
-        reference_filtered_df = analysis_filtered.loc[reference_mask].copy()
-
-        if filtered_df.empty:
-            st.warning("No matches in Delta range.")
+        reference_match_ids = set(reference_filtered_df["matchId"].dropna().tolist())
         if reference_filtered_df.empty:
-            st.warning("No matches in Reference range. Delta cards will show 0 until you choose a valid range.")
+            reference_start_date, reference_end_date = ref_start_ts.date(), ref_end_ts.date()
+            st.warning("No matches found in the selected reference. Delta values will show 0.")
+        else:
+            reference_start_date = reference_filtered_df["matchDate"].min().date()
+            reference_end_date = reference_filtered_df["matchDate"].max().date()
 
-        st.sidebar.caption(
-            f"Delta: {delta_start_date.strftime('%d/%m/%Y')} -> {delta_end_date.strftime('%d/%m/%Y')}"
+        st.caption(
+            f"Main range: {delta_start_date.strftime('%d/%m/%Y')} -> {delta_end_date.strftime('%d/%m/%Y')}"
         )
-        st.sidebar.caption(
-            f"Reference: {reference_start_date.strftime('%d/%m/%Y')} -> {reference_end_date.strftime('%d/%m/%Y')}"
+        st.caption(
+            "Comparison period (previous month): "
+            f"{reference_start_date.strftime('%d/%m/%Y')} -> {reference_end_date.strftime('%d/%m/%Y')}"
         )
-        st.sidebar.caption(f"Delta matches: {int(filtered_df['matchId'].nunique()) if 'matchId' in filtered_df.columns else 0}")
-        st.sidebar.caption(f"Reference matches: {int(reference_filtered_df['matchId'].nunique()) if 'matchId' in reference_filtered_df.columns else 0}")
+        st.caption(f"Selected matches: {int(filtered_df['matchId'].nunique()) if 'matchId' in filtered_df.columns else 0}")
+        st.caption(f"Comparison matches: {int(reference_filtered_df['matchId'].nunique()) if 'matchId' in reference_filtered_df.columns else 0}")
+
+st.markdown("**3) Data to display**")
+glossary_sorted = sorted(
+    all_kpi_options,
+    key=lambda k: metric_labels.get(k, k.replace("_", " ").title()).lower(),
+)
+
+def _build_kpi_glossary_df() -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "KPI": metric_labels.get(kpi, kpi.replace("_", " ").title()),
+            "Definition": metric_definitions.get(kpi, "Definition not available."),
+        }
+        for kpi in glossary_sorted
+    ])
+
+if hasattr(st, "dialog"):
+    @st.dialog("KPI Dictionary")
+    def show_kpi_dictionary():
+        glossary_df = _build_kpi_glossary_df()
+        search_text = st.text_input(
+            "Search KPI or definition",
+            placeholder="e.g. xG, passes, aerial",
+            key="kpi_dictionary_search",
+        ).strip()
+        if search_text:
+            mask = (
+                glossary_df["KPI"].str.contains(search_text, case=False, na=False) |
+                glossary_df["Definition"].str.contains(search_text, case=False, na=False)
+            )
+            glossary_df = glossary_df[mask].copy()
+
+        st.dataframe(
+            glossary_df,
+            use_container_width=True,
+            hide_index=True,
+            height=520,
+        )
+        st.caption(f"Showing {len(glossary_df)} KPI definition(s).")
+
+    _, info_col_right = st.columns([5, 2])
+    with info_col_right:
+        if st.button("ℹ️ Open KPI Dictionary", use_container_width=True):
+            show_kpi_dictionary()
+else:
+    with st.expander("ℹ️ Open KPI Dictionary"):
+        glossary_df = _build_kpi_glossary_df()
+        search_text = st.text_input(
+            "Search KPI or definition",
+            placeholder="e.g. xG, passes, aerial",
+            key="kpi_dictionary_search_fallback",
+        ).strip()
+        if search_text:
+            mask = (
+                glossary_df["KPI"].str.contains(search_text, case=False, na=False) |
+                glossary_df["Definition"].str.contains(search_text, case=False, na=False)
+            )
+            glossary_df = glossary_df[mask].copy()
+
+        st.dataframe(glossary_df, use_container_width=True, hide_index=True, height=520)
+        st.caption(f"Showing {len(glossary_df)} KPI definition(s).")
+
+selected_kpis = st.multiselect(
+    "KPIs",
+    options=all_kpi_options,
+    default=position_default_kpis,
+    format_func=lambda k: metric_labels.get(k, k.replace("_", " ").title()),
+    key="selected_kpis_main",
+)
+st.caption("Default KPIs for the player position are preselected. You can add or remove any available KPI.")
+if not selected_kpis:
+    st.warning("Select at least one KPI to display.")
+
+if "selected_kpis" not in locals() or not selected_kpis:
+    selected_kpis = all_kpi_options[:1] if all_kpi_options else []
 
 # Keep current global date window for other sections as the Analysis window
 start_date, end_date = analysis_start_date, analysis_end_date
@@ -1235,20 +1306,14 @@ if section == "Overview Stats":
     # Sort by date
     summary_df = summary_df.sort_values("matchDate")
 
-    # --- Apply Delta + Reference period filters ---
+    # --- Apply Main + Reference period filters ---
     summary_df["matchDate"] = pd.to_datetime(summary_df["matchDate"], errors="coerce")
     summary_df["match_date_only"] = summary_df["matchDate"].dt.date
-    summary_df["is_delta_period"] = (
-        (summary_df["match_date_only"] >= delta_start_date) &
-        (summary_df["match_date_only"] <= delta_end_date)
-    )
-    summary_df["is_reference_period"] = (
-        (summary_df["match_date_only"] >= reference_start_date) &
-        (summary_df["match_date_only"] <= reference_end_date)
-    )
+    summary_df["is_main_period"] = summary_df["matchId"].isin(delta_match_ids)
+    summary_df["is_reference_period"] = summary_df["matchId"].isin(reference_match_ids)
 
     period_filtered_df = summary_df[
-        summary_df["is_delta_period"] | summary_df["is_reference_period"]
+        summary_df["is_main_period"] | summary_df["is_reference_period"]
     ].copy()
     period_filtered_df = period_filtered_df.drop_duplicates(subset="matchId", keep="last")
 
@@ -1268,28 +1333,28 @@ if section == "Overview Stats":
         period_filtered_df = period_filtered_df.copy()
 
     if period_filtered_df.empty:
-        st.info("No matches in the selected Delta/Reference ranges.")
+        st.info("No matches in the selected Main/Reference ranges.")
         st.stop()
 
     # --- Create readable match labels and usage tags ---
     period_filtered_df["period_tag"] = np.select(
         [
-            period_filtered_df["is_delta_period"] & period_filtered_df["is_reference_period"],
-            period_filtered_df["is_delta_period"],
+            period_filtered_df["is_main_period"] & period_filtered_df["is_reference_period"],
+            period_filtered_df["is_main_period"],
             period_filtered_df["is_reference_period"],
         ],
-        ["DELTA+REF", "DELTA", "REF"],
+        ["Selected + Comparison", "Selected period", "Comparison period"],
         default="OUT",
     )
     date_str = period_filtered_df["matchDate"].dt.strftime("%Y-%m-%d").fillna("Unknown date")
     opp_str = period_filtered_df["oppositionTeamName"].astype("string").fillna("Unknown")
     period_filtered_df["match_label"] = (
-        date_str + " vs " + opp_str + " [" + period_filtered_df["period_tag"] + "]"
+        date_str + " vs " + opp_str + " - " + period_filtered_df["period_tag"]
     )
 
     # --- Match Filter Styled Like Excel ---
     with st.expander("Filter by Match (click to hide)", expanded=True):
-        st.caption("Tags: [DELTA] partido usado para el valor principal, [REF] para baseline, [DELTA+REF] para ambos.")
+        st.caption("Filter matches used in the selected period and in the comparison period.")
         match_options = (
             period_filtered_df[["matchId", "match_label", "matchDate", "period_tag"]]
             .drop_duplicates()
@@ -1356,19 +1421,19 @@ if section == "Overview Stats":
         st.info("No matches in the selected filters.")
         st.stop()
 
-    delta_df = selected_matches_df[selected_matches_df["is_delta_period"]].copy()
+    main_df = selected_matches_df[selected_matches_df["is_main_period"]].copy()
     reference_df = selected_matches_df[selected_matches_df["is_reference_period"]].copy()
 
-    if delta_df.empty:
-        st.info("No Delta matches selected. Select at least one [DELTA] match.")
+    if main_df.empty:
+        st.info("No selected-period matches chosen. Select at least one match.")
         st.stop()
     if reference_df.empty:
-        st.warning("No [REF] matches selected. Delta values are shown as 0 until a reference match is selected.")
+        st.warning("No comparison-period matches selected. Delta values are shown as 0.")
 
     st.caption(f"Showing Metrics for position: **{player_position}**")
     st.caption(
-        f"Selected matches -> Delta: {int(delta_df['matchId'].nunique())} | "
-        f"Reference: {int(reference_df['matchId'].nunique())}"
+        f"Selected matches: {int(main_df['matchId'].nunique())} | "
+        f"Comparison matches: {int(reference_df['matchId'].nunique())}"
     )
 
     # --- Set metric_keys dynamically by position ---
@@ -1383,7 +1448,7 @@ if section == "Overview Stats":
     aggregated_metrics = {}
 
     for key in metric_keys:
-        if key not in delta_df.columns:
+        if key not in main_df.columns:
             aggregated_metrics[key] = 0
             continue
 
@@ -1391,25 +1456,25 @@ if section == "Overview Stats":
 
         # Custom logic for % metrics based on true numerators/denominators
         if key == "pass_completion_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(delta_df, "passesAccurate", "passesTotal")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "passesAccurate", "passesTotal")
         elif key == "aerial_duel_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(delta_df, "aerialsWon", "aerialsTotal")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "aerialsWon", "aerialsTotal")
         elif key == "take_on_success_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(delta_df, "dribblesWon", "dribblesAttempted")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "dribblesWon", "dribblesAttempted")
         elif key == "shots_on_target_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(delta_df, "shotsOnTarget", "shotsTotal")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "shotsOnTarget", "shotsTotal")
         elif key == "tackle_success_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(delta_df, "tackleSuccessful", "tacklesTotal")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "tackleSuccessful", "tacklesTotal")
         elif key == "throwin_accuracy_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(delta_df, "throwInsAccurate", "throwInsTotal")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "throwInsAccurate", "throwInsTotal")
         elif key == "long_pass_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(delta_df, "long_passes_success", "long_passes_total")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "long_passes_success", "long_passes_total")
         else:
             # Sum or mean depending on type
             if metric_type == "percentage":
-                aggregated_metrics[key] = round(pd.to_numeric(delta_df[key], errors="coerce").mean(), 1)
+                aggregated_metrics[key] = round(pd.to_numeric(main_df[key], errors="coerce").mean(), 1)
             else:
-                aggregated_metrics[key] = round(pd.to_numeric(delta_df[key], errors="coerce").sum(), 2)
+                aggregated_metrics[key] = round(pd.to_numeric(main_df[key], errors="coerce").sum(), 2)
 
     # --- Scorecards (4 per row) ---
     metrics_per_row = 4
@@ -1420,7 +1485,7 @@ if section == "Overview Stats":
         for i, key in enumerate(chunk):
             label = metric_labels.get(key, key.replace("_", " ").title())
             value = aggregated_metrics.get(key, "N/A")
-            display_metric_card(cols[i], label, value, delta_df, reference_df, key, color="#fcec03")
+            display_metric_card(cols[i], label, value, main_df, reference_df, key, color="#fcec03")
 
     with st.expander("Export PDF Report", expanded=False):
         season_value = st.session_state.get("selected_season") or "All seasons"
@@ -1430,6 +1495,7 @@ if section == "Overview Stats":
         report_signature = (
             f"{player_id}|{player_name}|{season_value}|"
             f"{delta_start_date}|{delta_end_date}|{reference_start_date}|{reference_end_date}|"
+            f"{comparison_mode_label}|{comparison_value_label}|"
             f"{','.join(str(mid) for mid in current_selected)}"
         )
         if st.session_state.get("player_report_pdf_signature") != report_signature:
@@ -1438,16 +1504,20 @@ if section == "Overview Stats":
             st.session_state.pop("player_report_pdf_name", None)
 
         generating_key = "player_report_pdf_generating"
+        auto_download_key = "player_report_pdf_auto_download_pending"
         if generating_key not in st.session_state:
             st.session_state[generating_key] = False
+        if auto_download_key not in st.session_state:
+            st.session_state[auto_download_key] = False
 
         if st.button(
-            "Generate PDF report",
+            "Generate & Download PDF report",
             key="generate_player_report_pdf",
             type="primary",
             disabled=st.session_state.get(generating_key, False),
         ):
             st.session_state[generating_key] = True
+            st.session_state[auto_download_key] = True
             st.rerun()
 
         if st.session_state.get(generating_key, False):
@@ -1489,13 +1559,13 @@ if section == "Overview Stats":
                     st.error(f"Could not load PDF generator: {e}")
                 else:
                     try:
-                        games_played_pdf = int(delta_df["matchId"].nunique()) if "matchId" in delta_df.columns else int(games_played)
-                        if "isFirstEleven" in delta_df.columns:
-                            games_starter_pdf = int(pd.to_numeric(delta_df["isFirstEleven"], errors="coerce").fillna(0).sum())
+                        games_played_pdf = int(main_df["matchId"].nunique()) if "matchId" in main_df.columns else int(games_played)
+                        if "isFirstEleven" in main_df.columns:
+                            games_starter_pdf = int(pd.to_numeric(main_df["isFirstEleven"], errors="coerce").fillna(0).sum())
                         else:
                             games_starter_pdf = int(games_as_starter)
-                        if "minutesPlayed" in delta_df.columns:
-                            minutes_pdf = float(pd.to_numeric(delta_df["minutesPlayed"], errors="coerce").fillna(0).sum())
+                        if "minutesPlayed" in main_df.columns:
+                            minutes_pdf = float(pd.to_numeric(main_df["minutesPlayed"], errors="coerce").fillna(0).sum())
                         else:
                             minutes_pdf = float(total_minutes)
 
@@ -1517,12 +1587,14 @@ if section == "Overview Stats":
                             "delta_end_date": delta_end_date,
                             "reference_start_date": reference_start_date,
                             "reference_end_date": reference_end_date,
+                            "comparison_mode": comparison_mode_label,
+                            "comparison_value": comparison_value_label,
                             "selected_matches": selected_match_labels,
                         }
 
-                        # Build Trends charts for PDF (same player, selected Delta matches).
+                        # Build Trends charts for PDF (same player, selected main matches).
                         trends_data_pdf = []
-                        trends_source_df = delta_df.copy()
+                        trends_source_df = main_df.copy()
                         if not trends_source_df.empty and "matchDate" in trends_source_df.columns:
                             trends_source_df["matchDate"] = pd.to_datetime(trends_source_df["matchDate"], errors="coerce")
                             trends_source_df = trends_source_df[trends_source_df["matchDate"].notna()].sort_values("matchDate")
@@ -1578,7 +1650,7 @@ if section == "Overview Stats":
                                 player_info=player_info_payload,
                                 player_position=player_position,
                                 aggregated_metrics=aggregated_metrics,
-                                filtered_df=delta_df,
+                                filtered_df=main_df,
                                 filters_data=filters_data,
                                 logo_path=LOGO_PATH,
                                 calculate_delta_func=calculate_delta,
@@ -1597,16 +1669,39 @@ if section == "Overview Stats":
 
                         st.session_state["player_report_pdf_bytes"] = pdf_bytes
                         st.session_state["player_report_pdf_name"] = file_name
-                        st.success("PDF generated. Download it below.")
+                        st.success("PDF generated. Download should start automatically.")
                     except Exception as e:
+                        st.session_state[auto_download_key] = False
                         st.error(f"Failed to generate PDF: {e}")
             finally:
                 st.session_state[generating_key] = False
                 overlay_placeholder.empty()
 
+        if st.session_state.get(auto_download_key, False) and st.session_state.get("player_report_pdf_bytes"):
+            pdf_b64 = base64.b64encode(st.session_state["player_report_pdf_bytes"]).decode("utf-8")
+            file_name = st.session_state.get("player_report_pdf_name", "player_report.pdf")
+            components.html(
+                f"""
+                <script>
+                  (function() {{
+                    const a = document.createElement('a');
+                    a.href = 'data:application/pdf;base64,{pdf_b64}';
+                    a.download = '{file_name}';
+                    a.style.display = 'none';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                  }})();
+                </script>
+                """,
+                height=0
+            )
+            st.session_state[auto_download_key] = False
+            st.caption("If download does not start automatically, use the fallback button below.")
+
         if st.session_state.get("player_report_pdf_bytes"):
             st.download_button(
-                "Download PDF report",
+                "Download PDF report (fallback)",
                 data=st.session_state["player_report_pdf_bytes"],
                 file_name=st.session_state.get("player_report_pdf_name", "player_report.pdf"),
                 mime="application/pdf",
@@ -1615,7 +1710,7 @@ if section == "Overview Stats":
 
     # --- Full Stats Table ---
     display_df = selected_matches_df.copy()
-    display_df = display_df.drop(columns=["match_date_only", "is_delta_period", "is_reference_period"], errors="ignore")
+    display_df = display_df.drop(columns=["match_date_only", "is_main_period", "is_reference_period"], errors="ignore")
     display_df = display_df.rename(columns={"period_tag": "Usage"})
 
     # Format KPI columns like the scorecards
@@ -2266,7 +2361,7 @@ elif section == "Player Comparison":
     grouped = all_metrics_df.groupby("playerId")
     summary_metrics_df = grouped[["playerName","teamName"]].first().reset_index()
 
-    for kpi in position_kpi_map.get(player_position, []):
+    for kpi in selected_kpis:
         metric_type = metric_type_map.get(kpi, "aggregate")
         if metric_type == "percentage":
             numerator, denominator = percentage_formula_map.get(kpi, (None, None))
@@ -2300,7 +2395,7 @@ elif section == "Player Comparison":
     # --- Charts ---
     st.info("Comparison by KPI")
 
-    for kpi in position_kpi_map.get(player_position, []):
+    for kpi in selected_kpis:
         if kpi not in summary_metrics_df.columns:
             continue
 

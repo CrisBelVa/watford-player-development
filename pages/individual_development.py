@@ -3,11 +3,13 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import base64
 from datetime import datetime, timedelta
 import os
 from PIL import Image
 from pathlib import Path
 import io
+import streamlit.components.v1 as components
 from utils.pdf_generator import generate_individual_development_report_landscape
 from utils.sheets_client import GoogleSheetsClient
 
@@ -51,10 +53,24 @@ def get_sheets_client() -> GoogleSheetsClient:
 def _read_local_training_file() -> pd.DataFrame:
     if not LOCAL_TRAINING_FILE.exists():
         return pd.DataFrame()
-    try:
-        return pd.read_excel(LOCAL_TRAINING_FILE, header=1)
-    except Exception:
-        return pd.read_excel(LOCAL_TRAINING_FILE, header=0)
+    expected_tokens = ("mes", "month", "date", "fecha", "player", "jugador")
+    best_header = 0
+    best_score = -1
+
+    # Detect the most likely header row (0..4) to avoid shifting data rows into headers.
+    for header_idx in range(5):
+        try:
+            candidate_df = pd.read_excel(LOCAL_TRAINING_FILE, header=header_idx, nrows=1)
+        except Exception:
+            continue
+
+        normalized_cols = [str(c).strip().lower() for c in candidate_df.columns]
+        score = sum(any(token == col for col in normalized_cols) for token in expected_tokens)
+        if score > best_score:
+            best_score = score
+            best_header = header_idx
+
+    return pd.read_excel(LOCAL_TRAINING_FILE, header=best_header)
 
 def _load_sessions_raw_df() -> pd.DataFrame:
     sheets_client = get_sheets_client()
@@ -62,7 +78,7 @@ def _load_sessions_raw_df() -> pd.DataFrame:
         try:
             return sheets_client.read_sessions_df()
         except Exception as exc:
-            st.warning(f"No se pudo leer la pestaña 'Sesions' de Google Sheets. Usando fallback local. ({exc})")
+            st.warning(f"Could not read Google Sheets tab 'Sesions'. Using local fallback. ({exc})")
     return _read_local_training_file()
 
 def _normalize_sessions_df(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -126,12 +142,55 @@ def _save_sessions_raw_df(df_to_save: pd.DataFrame) -> str:
             sheets_client.write_sessions_df(df_to_save)
             return "Google Sheets / Sesions"
         except Exception as exc:
-            st.warning(f"No se pudo guardar en Google Sheets (Sesions). Guardando en local. ({exc})")
+            st.warning(f"Could not save to Google Sheets (Sesions). Saving locally. ({exc})")
 
     LOCAL_TRAINING_FILE.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(LOCAL_TRAINING_FILE, engine="openpyxl") as writer:
         df_to_save.to_excel(writer, index=False)
     return str(LOCAL_TRAINING_FILE)
+
+def _pick_existing_column(columns, candidates):
+    normalized = {
+        str(col).strip().lower().replace("_", " ").replace("-", " "): col
+        for col in columns
+    }
+    for cand in candidates:
+        key = cand.strip().lower().replace("_", " ").replace("-", " ")
+        if key in normalized:
+            return normalized[key]
+    return None
+
+def _append_training_session_row(
+    session_date,
+    player_name: str,
+    training_text: str = "",
+    meeting_text: str = "",
+    review_text: str = "",
+) -> str:
+    raw_df = _load_sessions_raw_df().copy()
+
+    if raw_df.empty:
+        raw_df = pd.DataFrame(columns=["Mes", "Player", "Individual Training", "Meeting", "Review Clips"])
+
+    date_col = _pick_existing_column(raw_df.columns, ["mes", "month", "date", "fecha"]) or "Mes"
+    player_col = _pick_existing_column(raw_df.columns, ["player", "jugador"]) or "Player"
+    training_col = _pick_existing_column(raw_df.columns, ["individual training", "training type", "training"]) or "Individual Training"
+    meeting_col = _pick_existing_column(raw_df.columns, ["meeting", "reunion", "meeting type"]) or "Meeting"
+    review_col = _pick_existing_column(raw_df.columns, ["review clips", "review clip", "review"]) or "Review Clips"
+
+    for required_col in [date_col, player_col, training_col, meeting_col, review_col]:
+        if required_col not in raw_df.columns:
+            raw_df[required_col] = ""
+
+    new_row = {col: "" for col in raw_df.columns}
+    new_row[date_col] = pd.to_datetime(session_date).strftime("%Y-%m-%d")
+    new_row[player_col] = str(player_name).strip()
+    new_row[training_col] = str(training_text).strip()
+    new_row[meeting_col] = str(meeting_text).strip()
+    new_row[review_col] = str(review_text).strip()
+
+    updated_df = pd.concat([raw_df, pd.DataFrame([new_row])], ignore_index=True)
+    return _save_sessions_raw_df(updated_df)
 
 # --- Estilos CSS personalizados ---
 st.markdown("""
@@ -181,7 +240,7 @@ def load_training_data():
             # Eliminar filas donde la fecha no pudo ser convertida
             df = df[df['Date'].notna()]
         except Exception as e:
-            st.error(f"Error al convertir fechas: {e}")
+            st.error(f"Error converting dates: {e}")
             return pd.DataFrame()
         
         # Extraer año, mes y año-mes para agrupaciones
@@ -193,15 +252,16 @@ def load_training_data():
         text_columns = ['Player', 'Training_Type', 'Meeting', 'Review_Clips']
         for col in text_columns:
             if col in df.columns:
-                df[col] = df[col].astype(str).str.strip()
-                # Reemplazar 'nan' con NaN
-                df[col] = df[col].replace('nan', np.nan)
+                cleaned = df[col].astype("string").str.strip()
+                lowered = cleaned.str.lower()
+                # Normalize spreadsheet blanks/placeholders to missing values.
+                df[col] = cleaned.mask(lowered.isin(["", "nan", "none", "null", "nat"]), pd.NA)
         
         return df
     except Exception as e:
-        st.error(f"Error al cargar los datos de entrenamiento: {e}")
+        st.error(f"Error loading training data: {e}")
         import traceback
-        st.error(f"Detalles del error: {traceback.format_exc()}")
+        st.error(f"Error details: {traceback.format_exc()}")
         return pd.DataFrame()
 
 # --- Funciones de ayuda para el Dashboard ---
@@ -217,7 +277,7 @@ def get_current_month_metrics(start_date=None, end_date=None):
                 'meetings': 0,
                 'review_clips': 0,
                 'jugadores_activos': 0,
-                'total_jugadores': 1,  # Asumimos que hay al menos un jugador
+                'total_jugadores': 0,
                 'porcentaje_participacion': 0
             }
         
@@ -241,14 +301,14 @@ def get_current_month_metrics(start_date=None, end_date=None):
             current_year_month = now.strftime('%Y-%m')
             filtered_data = df[df['Year_Month'] == current_year_month].copy()
         
-        # Contar actividades
+        # Contar activities
         entrenamientos = filtered_data['Training_Type'].count()
         meetings = filtered_data['Meeting'].count()
         review_clips = filtered_data['Review_Clips'].count()
         
-        # Contar jugadores únicos con actividades
+        # Contar jugadores únicos con activities
         jugadores_activos = filtered_data['Player'].nunique()
-        total_jugadores = 1  # Asumimos que hay al menos un jugador
+        total_jugadores = df['Player'].dropna().nunique()
         
         # Calcular porcentaje de participación
         porcentaje_participacion = (jugadores_activos / total_jugadores) * 100 if total_jugadores > 0 else 0
@@ -262,19 +322,19 @@ def get_current_month_metrics(start_date=None, end_date=None):
             'porcentaje_participacion': round(porcentaje_participacion, 2)
         }
     except Exception as e:
-        st.error(f"Error al cargar métricas: {e}")
+        st.error(f"Error loading metrics: {e}")
         return {
             'entrenamientos': 0,
             'meetings': 0,
             'review_clips': 0,
             'jugadores_activos': 0,
-            'total_jugadores': 1,
+            'total_jugadores': 0,
             'porcentaje_participacion': 0
         }
 
 @st.cache_data(ttl=3600)  # Cachear por 1 hora
 def get_monthly_summary(start_date=None, end_date=None, months=6):
-    """Obtener resumen mensual de actividades para un rango de fechas"""
+    """Obtener resumen mensual de activities para un rango de fechas"""
     try:
         # Cargar datos de entrenamiento
         df = load_training_data()
@@ -302,7 +362,7 @@ def get_monthly_summary(start_date=None, end_date=None, months=6):
         if df_filtered.empty:
             return pd.DataFrame(columns=['mes', 'entrenamientos', 'meetings', 'review_clips', 'mes_formateado'])
         
-        # Agrupar por mes y contar actividades
+        # Agrupar por mes y contar activities
         monthly_summary = df_filtered.groupby('Year_Month').agg({
             'Training_Type': 'count',
             'Meeting': lambda x: x.notna().sum(),
@@ -325,17 +385,17 @@ def get_monthly_summary(start_date=None, end_date=None, months=6):
         
         return monthly_summary
     except Exception as e:
-        st.error(f"Error al cargar resumen mensual: {e}")
+        st.error(f"Error loading monthly summary: {e}")
         return pd.DataFrame(columns=['mes', 'entrenamientos', 'meetings', 'review_clips', 'mes_formateado'])
 
 @st.cache_data(ttl=3600)  # Cachear por 1 hora
 def get_players_summary(start_date=None, end_date=None):
-    """Obtener resumen de actividades por jugador para un rango de fechas"""
+    """Obtener resumen de activities por jugador para un rango de fechas"""
     try:
         # Cargar datos de entrenamiento
         df = load_training_data()
         if df.empty:
-            return pd.DataFrame(columns=['jugador', 'entrenamientos', 'meetings', 'review_clips', 'total_actividades'])
+            return pd.DataFrame(columns=['jugador', 'entrenamientos', 'meetings', 'review_clips', 'total_activities'])
         
         # Filtrar por rango de fechas si se especifican
         if start_date and end_date:
@@ -357,9 +417,9 @@ def get_players_summary(start_date=None, end_date=None):
             filtered_data = df[df['Year_Month'] == current_year_month].copy()
         
         if filtered_data.empty:
-            return pd.DataFrame(columns=['jugador', 'entrenamientos', 'meetings', 'review_clips', 'total_actividades'])
+            return pd.DataFrame(columns=['jugador', 'entrenamientos', 'meetings', 'review_clips', 'total_activities'])
         
-        # Agrupar por jugador y contar actividades
+        # Agrupar por jugador y contar activities
         player_summary = filtered_data.groupby('Player').agg({
             'Training_Type': 'count',
             'Meeting': lambda x: x.notna().sum(),
@@ -374,20 +434,20 @@ def get_players_summary(start_date=None, end_date=None):
             'Review_Clips': 'review_clips'
         })
         
-        # Calcular total de actividades
-        player_summary['total_actividades'] = (
+        # Calcular total de activities
+        player_summary['total_activities'] = (
             player_summary['entrenamientos'] + 
             player_summary['meetings'] + 
             player_summary['review_clips']
         )
         
-        # Ordenar por total de actividades (descendente)
-        player_summary = player_summary.sort_values('total_actividades', ascending=False)
+        # Ordenar por total de activities (descendente)
+        player_summary = player_summary.sort_values('total_activities', ascending=False)
         
         return player_summary
     except Exception as e:
-        st.error(f"Error al cargar resumen por jugador: {e}")
-        return pd.DataFrame(columns=['jugador', 'entrenamientos', 'meetings', 'review_clips', 'total_actividades'])
+        st.error(f"Error loading player summary: {e}")
+        return pd.DataFrame(columns=['jugador', 'entrenamientos', 'meetings', 'review_clips', 'total_activities'])
 
 # Cargar datos iniciales (sin filtros)
 current_month_metrics = get_current_month_metrics()
@@ -409,7 +469,7 @@ with st.sidebar:
 
     # Navegación
     page = st.radio(
-        "Seleccione una sección:",
+        "Select a section:",
         ["General Dashboard", "Players Profile", "Files"],
         label_visibility="collapsed"
     )
@@ -438,7 +498,7 @@ if page == "General Dashboard":
     st.header("General Dashboard")
     
     # Mostrar indicador de carga mientras se obtienen los datos
-    with st.spinner('Cargando datos del dashboard...'):
+    with st.spinner('Loading dashboard data...'):
         
         # Obtener métricas para el rango de fechas seleccionado
         metrics = get_current_month_metrics(fecha_inicio, fecha_fin)
@@ -449,9 +509,9 @@ if page == "General Dashboard":
         with col1:
             st.markdown(f"""
             <div class='metric-card'>
-                <div class='metric-label'>Entrenamientos</div>
+                <div class='metric-label'>Trainings</div>
                 <div class='metric-value'>{metrics['entrenamientos']}</div>
-                <div class='metric-delta'>+2 vs mes anterior</div>
+                <div class='metric-delta'>+2 vs previous month</div>
             </div>
             """, unsafe_allow_html=True)
             
@@ -460,7 +520,7 @@ if page == "General Dashboard":
             <div class='metric-card'>
                 <div class='metric-label'>Meetings</div>
                 <div class='metric-value'>{metrics['meetings']}</div>
-                <div class='metric-delta'>+1 vs mes anterior</div>
+                <div class='metric-delta'>+1 vs previous month</div>
             </div>
             """, unsafe_allow_html=True)
             
@@ -469,16 +529,16 @@ if page == "General Dashboard":
             <div class='metric-card'>
                 <div class='metric-label'>Review Clips</div>
                 <div class='metric-value'>{metrics['review_clips']}</div>
-                <div class='metric-delta'>{'-1' if metrics['review_clips'] > 0 else '0'} vs mes anterior</div>
+                <div class='metric-delta'>{'-1' if metrics['review_clips'] > 0 else '0'} vs previous month</div>
             </div>
             """, unsafe_allow_html=True)
             
         with col4:
             st.markdown(f"""
             <div class='metric-card'>
-                <div class='metric-label'>Participación</div>
+                <div class='metric-label'>Participation</div>
                 <div class='metric-value'>{metrics['jugadores_activos']}/{metrics['total_jugadores']}</div>
-                <div class='metric-delta'>{metrics['porcentaje_participacion']}% de jugadores</div>
+                <div class='metric-delta'>{metrics['porcentaje_participacion']}% of players</div>
             </div>
             """, unsafe_allow_html=True)
         
@@ -495,9 +555,9 @@ if page == "General Dashboard":
             fig.add_trace(go.Bar(
                 x=monthly_summary['mes_formateado'],
                 y=monthly_summary['entrenamientos'],
-                name='Entrenamientos',
+                name='Trainings',
                 marker_color='#fcec03',  # Amarillo Watford
-                hovertemplate='%{y} entrenamientos<extra></extra>'
+                hovertemplate='%{y} trainings<extra></extra>'
             ))
             
             fig.add_trace(go.Bar(
@@ -519,8 +579,8 @@ if page == "General Dashboard":
             # Actualizar diseño del gráfico
             fig.update_layout(
                 barmode='group',
-                xaxis_title='Mes',
-                yaxis_title='Cantidad de Actividades',
+                xaxis_title='Month',
+                yaxis_title='Activity Count',
                 plot_bgcolor='rgba(0,0,0,0)',
                 paper_bgcolor='rgba(0,0,0,0)',
                 legend=dict(
@@ -535,7 +595,7 @@ if page == "General Dashboard":
             
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("No hay datos disponibles para mostrar el gráfico de evolución.")
+            st.warning("No data available to display the evolution chart.")
         
         # Resumen por jugador
         st.subheader(f"Summary All Players - ({fecha_inicio.strftime('%d/%m/%Y')} - {fecha_fin.strftime('%d/%m/%Y')})")
@@ -546,16 +606,16 @@ if page == "General Dashboard":
         # Mostrar tabla con resumen por jugador
         if not players_summary.empty:
             st.dataframe(
-                players_summary[['jugador', 'entrenamientos', 'meetings', 'review_clips', 'total_actividades']],
+                players_summary[['jugador', 'entrenamientos', 'meetings', 'review_clips', 'total_activities']],
                 column_config={
-                    "jugador": "Jugador",
-                    "entrenamientos": st.column_config.NumberColumn("Entrenamientos", format="%d"),
+                    "jugador": "Player",
+                    "entrenamientos": st.column_config.NumberColumn("Trainings", format="%d"),
                     "meetings": st.column_config.NumberColumn("Meetings", format="%d"),
                     "review_clips": st.column_config.NumberColumn("Review Clips", format="%d"),
-                    "total_actividades": st.column_config.NumberColumn(
-                        "Total Actividades", 
+                    "total_activities": st.column_config.NumberColumn(
+                        "Total activities", 
                         format="%d",
-                        help="Suma de todas las actividades del jugador"
+                        help="Sum of all player activities"
                     )
                 },
                 hide_index=True,
@@ -565,18 +625,18 @@ if page == "General Dashboard":
             # Gráfico de evolución por jugador
             
             # Obtener datos para el gráfico
-            df_actividades = load_training_data()
+            df_activities = load_training_data()
             
             # Filtrar por rango de fechas
-            date_mask = (df_actividades['Date'].dt.date >= fecha_inicio) & (df_actividades['Date'].dt.date <= fecha_fin)
-            df_actividades = df_actividades[date_mask].copy()
+            date_mask = (df_activities['Date'].dt.date >= fecha_inicio) & (df_activities['Date'].dt.date <= fecha_fin)
+            df_activities = df_activities[date_mask].copy()
             
-            if not df_actividades.empty:
+            if not df_activities.empty:
                 # Crear una columna para el mes-año
-                df_actividades['mes_anio'] = df_actividades['Date'].dt.to_period('M').astype(str)
+                df_activities['mes_anio'] = df_activities['Date'].dt.to_period('M').astype(str)
                 
-                # Agrupar por jugador y mes para contar actividades
-                df_agrupado = df_actividades.groupby(['Player', 'mes_anio']).agg({
+                # Agrupar por jugador y mes para contar activities
+                df_agrupado = df_activities.groupby(['Player', 'mes_anio']).agg({
                     'Training_Type': 'count',
                     'Meeting': lambda x: x.notna().sum(),
                     'Review_Clips': lambda x: x.notna().sum()
@@ -584,33 +644,33 @@ if page == "General Dashboard":
                 
                 # Renombrar columnas
                 df_agrupado = df_agrupado.rename(columns={
-                    'Player': 'Jugador',
-                    'mes_anio': 'Mes',
-                    'Training_Type': 'Entrenamientos',
+                    'Player': 'Player',
+                    'mes_anio': 'Month',
+                    'Training_Type': 'Trainings',
                     'Meeting': 'Meetings',
                     'Review_Clips': 'Review_Clips'
                 })
                 
                 # Ordenar por mes
-                df_agrupado = df_agrupado.sort_values('Mes')
+                df_agrupado = df_agrupado.sort_values('Month')
                 
                 # Crear pestañas para cada tipo de actividad
-                tab1, tab2, tab3 = st.tabs(["Entrenamientos", "Meetings", "Review Clips"])
+                tab1, tab2, tab3 = st.tabs(["Trainings", "Meetings", "Review Clips"])
                 
                 with tab1:
                     fig_entrenamientos = px.line(
                         df_agrupado, 
-                        x='Mes', 
-                        y='Entrenamientos',
-                        color='Jugador',
-                        title='Evolución de Entrenamientos por Jugador',
-                        labels={'Entrenamientos': 'Cantidad', 'Mes': 'Mes'},
+                        x='Month', 
+                        y='Trainings',
+                        color='Player',
+                        title='Training Evolution by Player',
+                        labels={'Trainings': 'Count', 'Month': 'Month'},
                         markers=True
                     )
                     fig_entrenamientos.update_layout(
-                        xaxis_title='Mes',
-                        yaxis_title='Cantidad de Entrenamientos',
-                        legend_title='Jugador',
+                        xaxis_title='Month',
+                        yaxis_title='Training Count',
+                        legend_title='Player',
                         hovermode='x unified'
                     )
                     st.plotly_chart(fig_entrenamientos, use_container_width=True)
@@ -618,17 +678,17 @@ if page == "General Dashboard":
                 with tab2:
                     fig_meetings = px.line(
                         df_agrupado, 
-                        x='Mes', 
+                        x='Month', 
                         y='Meetings',
-                        color='Jugador',
-                        title='Evolución de Meetings por Jugador',
-                        labels={'Meetings': 'Cantidad', 'Mes': 'Mes'},
+                        color='Player',
+                        title='Meeting Evolution by Player',
+                        labels={'Meetings': 'Count', 'Month': 'Month'},
                         markers=True
                     )
                     fig_meetings.update_layout(
-                        xaxis_title='Mes',
-                        yaxis_title='Cantidad de Meetings',
-                        legend_title='Jugador',
+                        xaxis_title='Month',
+                        yaxis_title='Meeting Count',
+                        legend_title='Player',
                         hovermode='x unified'
                     )
                     st.plotly_chart(fig_meetings, use_container_width=True)
@@ -636,24 +696,24 @@ if page == "General Dashboard":
                 with tab3:
                     fig_clips = px.line(
                         df_agrupado, 
-                        x='Mes', 
+                        x='Month', 
                         y='Review_Clips',
-                        color='Jugador',
-                        title='Evolución de Review Clips por Jugador',
-                        labels={'Review_Clips': 'Cantidad', 'Mes': 'Mes'},
+                        color='Player',
+                        title='Review Clips Evolution by Player',
+                        labels={'Review_Clips': 'Count', 'Month': 'Month'},
                         markers=True
                     )
                     fig_clips.update_layout(
-                        xaxis_title='Mes',
-                        yaxis_title='Cantidad de Review Clips',
-                        legend_title='Jugador',
+                        xaxis_title='Month',
+                        yaxis_title='Review Clips Count',
+                        legend_title='Player',
                         hovermode='x unified'
                     )
                     st.plotly_chart(fig_clips, use_container_width=True)
             else:
-                st.warning("No hay datos de actividades para mostrar en el rango de fechas seleccionado.")
+                st.warning("No activity data to display in the selected date range.")
         else:
-            st.info("No hay datos de actividades para mostrar en el período seleccionado.")
+            st.info("No activity data to display in the selected period.")
             
         # Información adicional
         st.markdown("---")
@@ -680,10 +740,10 @@ elif page == "Players Profile":
             # Crear un diccionario con índice numérico para compatibilidad
             return {i+1: jugador for i, jugador in enumerate(jugadores)}
         except Exception as e:
-            st.error(f"Error al cargar jugadores activos: {e}")
+            st.error(f"Error loading active players: {e}")
             return {}
     
-    # Obtener actividades del jugador
+    # Obtener activities del jugador
     @st.cache_data(ttl=600)  # Cachear por 10 minutos
     def load_player_activities(player_id, start_date, end_date):
         try:
@@ -704,33 +764,33 @@ elif page == "Players Profile":
             fecha_fin_dt = pd.to_datetime(end_date)
             
             # Filtrar por jugador usando el filtro de fechas del sidebar
-            actividades = df[
+            activities = df[
                 (df['Player'] == jugador_nombre) &
                 (df['Date'] >= fecha_inicio_dt) &
                 (df['Date'] <= fecha_fin_dt)
             ].copy()
             
-            if actividades.empty:
+            if activities.empty:
                 return pd.DataFrame()
             
-            # Crear un DataFrame con las actividades en formato largo
-            actividades_largas = []
+            # Crear un DataFrame con las activities en formato largo
+            activities_largas = []
             
             # Procesar entrenamientos
-            entrenamientos = actividades[actividades['Training_Type'].notna()]
+            entrenamientos = activities[activities['Training_Type'].notna()]
             for _, row in entrenamientos.iterrows():
-                actividades_largas.append({
+                activities_largas.append({
                     'fecha': row['Date'],
-                    'tipo': 'Entrenamiento',
+                    'tipo': 'Training',
                     'subtipo': row['Training_Type'],
-                    'descripcion': f"Entrenamiento: {row['Training_Type']}",
+                    'descripcion': f"Training: {row['Training_Type']}",
                     'jugador': row['Player']
                 })
             
             # Procesar meetings
-            meetings = actividades[actividades['Meeting'].notna()]
+            meetings = activities[activities['Meeting'].notna()]
             for _, row in meetings.iterrows():
-                actividades_largas.append({
+                activities_largas.append({
                     'fecha': row['Date'],
                     'tipo': 'Meeting',
                     'subtipo': row['Meeting'],
@@ -739,30 +799,30 @@ elif page == "Players Profile":
                 })
             
             # Procesar review clips
-            reviews = actividades[actividades['Review_Clips'].notna()]
+            reviews = activities[activities['Review_Clips'].notna()]
             for _, row in reviews.iterrows():
-                actividades_largas.append({
+                activities_largas.append({
                     'fecha': row['Date'],
                     'tipo': 'Review Clip',
-                    'subtipo': 'Revisión de video',
+                    'subtipo': 'Video review',
                     'descripcion': f"Review Clip: {row['Review_Clips']}",
                     'jugador': row['Player']
                 })
             
-            # Crear DataFrame con todas las actividades
-            if actividades_largas:
-                return pd.DataFrame(actividades_largas).sort_values('fecha', ascending=False)
+            # Crear DataFrame con todas las activities
+            if activities_largas:
+                return pd.DataFrame(activities_largas).sort_values('fecha', ascending=False)
             return pd.DataFrame()
             
         except Exception as e:
-            st.error(f"Error al cargar actividades del jugador: {e}")
+            st.error(f"Error loading player activities: {e}")
             return pd.DataFrame()
     
     # Cargar jugadores activos
     jugadores = load_active_players()
     
     if not jugadores:
-        st.warning("No se encontraron jugadores activos en los datos de entrenamiento.")
+        st.warning("No active players found in training data.")
         st.stop()
     
     # Selector de jugador principal
@@ -781,7 +841,7 @@ elif page == "Players Profile":
             "Select players",
             options=list(jugadores.keys()),
             format_func=lambda x: jugadores[x],
-            default=[list(jugadores.keys())[0]]  # Por defecto el primer jugador
+            default=[list(jugadores.keys())[0]]  # Default: first player
         )
         jugadores_comparar = [jugadores[jugador_id] for jugador_id in jugadores_comparar]
 
@@ -809,13 +869,13 @@ elif page == "Players Profile":
 
     # Aggregate activity counts
     summary = df_filtered.groupby("Player").agg(
-        Entrenamientos=pd.NamedAgg(column="Training_Type", aggfunc=lambda x: x.notna().sum()),
+        Trainings=pd.NamedAgg(column="Training_Type", aggfunc=lambda x: x.notna().sum()),
         Meetings=pd.NamedAgg(column="Meeting", aggfunc=lambda x: x.notna().sum()),
         Review_Clips=pd.NamedAgg(column="Review_Clips", aggfunc=lambda x: x.notna().sum())
     ).reset_index()
 
     # Add total column
-    summary["Total Actividades"] = summary[["Entrenamientos", "Meetings", "Review_Clips"]].sum(axis=1)
+    summary["Total activities"] = summary[["Trainings", "Meetings", "Review_Clips"]].sum(axis=1)
 
     # Reorder rows: main player first
     summary = pd.concat([
@@ -838,16 +898,16 @@ elif page == "Players Profile":
     # --- Create grouped bar chart per player ---
     comparison_fig = go.Figure()
 
-    # Entrenamientos
+    # Trainings
     comparison_fig.add_trace(go.Bar(
         x=summary["Player"],
-        y=summary["Entrenamientos"],
-        name="Entrenamientos",
+        y=summary["Trainings"],
+        name="Trainings",
         marker_color=[
             "#fcec03" if player == jugador_seleccionado else "#d3d3d3"
             for player in summary["Player"]
         ],
-        hovertemplate="%{y} entrenamientos<extra></extra>"
+        hovertemplate="%{y} trainings<extra></extra>"
     ))
 
     # Meetings
@@ -871,11 +931,11 @@ elif page == "Players Profile":
     # Layout tweaks
     comparison_fig.update_layout(
         barmode="group",
-        xaxis_title="Jugador",
-        yaxis_title="Cantidad de Actividades",
-        legend_title="Tipo",
+        xaxis_title="Player",
+        yaxis_title="Activity Count",
+        legend_title="Type",
         plot_bgcolor="white",
-        title="Actividades por Jugador",
+        title="Activities by Player",
         margin=dict(l=20, r=20, t=40, b=20),
         legend=dict(
             orientation="h",
@@ -890,23 +950,23 @@ elif page == "Players Profile":
     pdf_comparison_fig = comparison_fig
 
     # --- Load individual activities for selected player ---
-    with st.spinner('Cargando datos del jugador...'):
-        df_actividades = load_player_activities(jugador_id, fecha_inicio, fecha_fin)
+    with st.spinner('Loading player data...'):
+        df_activities = load_player_activities(jugador_id, fecha_inicio, fecha_fin)
         
         jugador_info = next((v for k, v in jugadores.items() if k == jugador_id), "")
         
         st.subheader(f"Individual Activities - {jugador_info}")
 
-        if not df_actividades.empty:
-            tipos_disponibles = df_actividades["tipo"].unique().tolist()
+        if not df_activities.empty:
+            tipos_disponibles = df_activities["tipo"].unique().tolist()
             tipos_seleccionados = st.multiselect(
-                "Select Activities",
+                "Select activities",
                 options=tipos_disponibles,
                 default=tipos_disponibles,
-                key="filtro_tipo_actividades"
+                key="filtro_tipo_activities"
             )
 
-            df_filtrado = df_actividades[df_actividades["tipo"].isin(tipos_seleccionados)]
+            df_filtrado = df_activities[df_activities["tipo"].isin(tipos_seleccionados)]
 
             if not df_filtrado.empty:
                 df_mostrar = df_filtrado.copy()
@@ -920,77 +980,77 @@ elif page == "Players Profile":
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "fecha": "Fecha",
-                        "tipo": "Tipo de Actividad",
-                        "subtipo": "Detalle",
-                        "descripcion": "Descripción"
+                        "fecha": "Date",
+                        "tipo": "Activity Type",
+                        "subtipo": "Detail",
+                        "descripcion": "Description"
                     }
                 )
 
-                # Botón para exportar las actividades filtradas a Excel
+                # Botón para exportar las activities filtradas a Excel
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-                    df_mostrar.to_excel(writer, index=False, sheet_name="Actividades")
+                    df_mostrar.to_excel(writer, index=False, sheet_name="Activities")
 
                 buffer.seek(0)
 
                 st.download_button(
-                    label="📥 Exportar a Excel",
+                    label="📥 Export to Excel",
                     data=buffer,
                     file_name=f"individual_activities_{jugador_info.replace(' ', '_')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.info("No hay actividades del tipo seleccionado.")
+                st.info("No activities for the selected type.")
                 df_pdf_activities = df_filtrado.copy()
                 selected_types_for_pdf = list(tipos_seleccionados)
         else:
-            st.info("No hay actividades registradas para este jugador.")
+            st.info("No activities registered for this player.")
 
 
-        # Timeline de actividades
-        st.subheader(f"Timeline de Actividades - {jugador_info}")
+        # Timeline de activities
+        st.subheader(f"Activity Timeline - {jugador_info}")
         
-        if not df_actividades.empty:
+        if not df_activities.empty:
             # Crear gráfico de dispersión para la timeline
             # Usar solo las columnas disponibles en el DataFrame
             hover_columns = []
-            if 'descripcion' in df_actividades.columns:
+            if 'descripcion' in df_activities.columns:
                 hover_columns.append('descripcion')
-            if 'subtipo' in df_actividades.columns:
+            if 'subtipo' in df_activities.columns:
                 hover_columns.append('subtipo')
                 
             timeline_fig = px.scatter(
-                df_actividades,
+                df_activities,
                 x='fecha',
                 y='tipo',
                 color='tipo',
                 color_discrete_map={
-                    'Entrenamiento': '#fcec03',  # Amarillo Watford
+                    'Training': '#fcec03',  # Amarillo Watford
                     'Meeting': '#1f77b4',        # Azul
                     'Review Clip': '#2ca02c'      # Verde
                 },
-                size=[1] * len(df_actividades),  # Tamaño fijo para todos los puntos
+                size=[1] * len(df_activities),  # Size fijo para todos los puntos
                 hover_data=hover_columns if hover_columns else None,
-                labels={'fecha': 'Fecha', 'tipo': 'Tipo de Actividad'},
+                labels={'fecha': 'Date', 'tipo': 'Activity Type'},
                 title=f"({fecha_inicio.strftime('%d/%m/%Y')} - {fecha_fin.strftime('%d/%m/%Y')})"
             )
             
             timeline_fig.update_layout(
                 plot_bgcolor='rgba(0,0,0,0)',
                 paper_bgcolor='rgba(0,0,0,0)',
-                xaxis_title='Fecha',
+                xaxis_title='Date',
                 yaxis_title='',
                 showlegend=True,
-                legend_title='Tipo de Actividad',
+                legend_title='Activity Type',
                 margin=dict(l=0, r=0, t=40, b=0)
             )
             
             st.plotly_chart(timeline_fig, use_container_width=True)
             pdf_timeline_fig = timeline_fig
 
-        if df_pdf_activities.empty and not df_actividades.empty:
-            df_pdf_activities = df_actividades.copy()
+        if df_pdf_activities.empty and not df_activities.empty:
+            df_pdf_activities = df_activities.copy()
             selected_types_for_pdf = sorted(df_pdf_activities["tipo"].dropna().astype(str).unique().tolist())
 
     st.markdown("---")
@@ -1006,19 +1066,23 @@ elif page == "Players Profile":
         st.session_state.pop("individual_profile_pdf_name", None)
 
     if df_pdf_activities.empty:
-        st.info("No hay actividades en el rango/filtros actuales para generar el PDF.")
+        st.info("No activities in the current range/filters to generate PDF.")
     else:
         generating_key = "individual_profile_pdf_generating"
+        auto_download_key = "individual_profile_pdf_auto_download_pending"
         if generating_key not in st.session_state:
             st.session_state[generating_key] = False
+        if auto_download_key not in st.session_state:
+            st.session_state[auto_download_key] = False
 
         if st.button(
-            "Generate PDF report",
+            "Generate & Download PDF report",
             key="generate_individual_profile_pdf",
             type="primary",
             disabled=st.session_state.get(generating_key, False),
         ):
             st.session_state[generating_key] = True
+            st.session_state[auto_download_key] = True
             st.rerun()
 
         if st.session_state.get(generating_key, False):
@@ -1059,7 +1123,7 @@ elif page == "Players Profile":
                         .size()
                         .reset_index(name="count")
                     )
-                    df_summary_pdf["tipo"] = df_summary_pdf["tipo"].fillna("Sin tipo")
+                    df_summary_pdf["tipo"] = df_summary_pdf["tipo"].fillna("No type")
 
                     safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(jugador_info).strip())
                     safe_name = safe_name.strip("_") or "player"
@@ -1070,7 +1134,7 @@ elif page == "Players Profile":
                             player_name=jugador_info,
                             fecha_inicio=fecha_inicio.strftime("%Y-%m-%d"),
                             fecha_fin=fecha_fin.strftime("%Y-%m-%d"),
-                            df_actividades=df_pdf_activities,
+                            df_activities=df_pdf_activities,
                             df_summary=df_summary_pdf,
                             df_ratings=None,
                             fig_comparison=pdf_comparison_fig,
@@ -1084,16 +1148,39 @@ elif page == "Players Profile":
 
                     st.session_state["individual_profile_pdf_bytes"] = pdf_bytes
                     st.session_state["individual_profile_pdf_name"] = pdf_file_name
-                    st.success("PDF generated. Download it below.")
+                    st.success("PDF generated. Download should start automatically.")
                 except Exception as e:
+                    st.session_state[auto_download_key] = False
                     st.error(f"Failed to generate PDF report: {e}")
             finally:
                 st.session_state[generating_key] = False
                 overlay_placeholder.empty()
 
+        if st.session_state.get(auto_download_key, False) and st.session_state.get("individual_profile_pdf_bytes"):
+            pdf_b64 = base64.b64encode(st.session_state["individual_profile_pdf_bytes"]).decode("utf-8")
+            file_name = st.session_state.get("individual_profile_pdf_name", "individual_development_report.pdf")
+            components.html(
+                f"""
+                <script>
+                  (function() {{
+                    const a = document.createElement('a');
+                    a.href = 'data:application/pdf;base64,{pdf_b64}';
+                    a.download = '{file_name}';
+                    a.style.display = 'none';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                  }})();
+                </script>
+                """,
+                height=0,
+            )
+            st.session_state[auto_download_key] = False
+            st.caption("If download does not start automatically, use the fallback button below.")
+
         if st.session_state.get("individual_profile_pdf_bytes"):
             st.download_button(
-                "Download PDF report",
+                "Download PDF report (fallback)",
                 data=st.session_state["individual_profile_pdf_bytes"],
                 file_name=st.session_state.get("individual_profile_pdf_name", "individual_development_report.pdf"),
                 mime="application/pdf",
@@ -1101,12 +1188,70 @@ elif page == "Players Profile":
             )
             
 
-# 3. Registro de Actividades
+# 3. Registro de Activities
 elif page == "Files":
     st.header("Files")
-    st.write("Registra nuevas actividades de desarrollo individual para los jugadores.")
-    
-    
+    st.write("Register new individual development activities for players.")
+
+    st.markdown("### ➕ Add New Training Session")
+    try:
+        players_source_df = load_training_data()
+        player_options = sorted(players_source_df["Player"].dropna().astype(str).str.strip().unique().tolist()) if not players_source_df.empty else []
+    except Exception:
+        player_options = []
+
+    with st.form("add_single_training_session_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            new_date = st.date_input("Date", value=datetime.now().date(), key="new_training_date")
+        with col2:
+            if player_options:
+                selected_player = st.selectbox("Player", options=player_options, index=0, key="new_training_player_select")
+                custom_player = st.text_input("Or type new player name (optional)", key="new_training_player_custom")
+                player_name = custom_player.strip() if custom_player.strip() else selected_player
+            else:
+                player_name = st.text_input("Player", key="new_training_player_text")
+
+        training_text = st.text_input("Individual Training", placeholder="e.g. Defensive transitions", key="new_training_activity")
+        meeting_text = st.text_input("Meeting", placeholder="Optional", key="new_meeting_activity")
+        review_text = st.text_input("Review Clips", placeholder="Optional", key="new_review_activity")
+
+        add_row = st.form_submit_button("Add row to sessions")
+
+    if add_row:
+        player_name = str(player_name).strip()
+        training_text = str(training_text).strip()
+        meeting_text = str(meeting_text).strip()
+        review_text = str(review_text).strip()
+
+        if not player_name:
+            st.error("Player name is required.")
+        elif not any([training_text, meeting_text, review_text]):
+            st.error("Add at least one activity: Training, Meeting, or Review Clips.")
+        else:
+            try:
+                destination = _append_training_session_row(
+                    session_date=new_date,
+                    player_name=player_name,
+                    training_text=training_text,
+                    meeting_text=meeting_text,
+                    review_text=review_text,
+                )
+
+                if 'load_training_data' in globals():
+                    load_training_data.clear()
+                if 'get_current_month_metrics' in globals():
+                    get_current_month_metrics.clear()
+                if 'get_monthly_summary' in globals():
+                    get_monthly_summary.clear()
+                if 'get_players_summary' in globals():
+                    get_players_summary.clear()
+
+                st.success(f"Session added successfully to {destination}.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not add session row: {e}")
+
     # Descargar snapshot actual (desde Google Sheets / Sesions o fallback local)
     current_sessions_df = _load_sessions_raw_df()
     if not current_sessions_df.empty:
@@ -1115,37 +1260,37 @@ elif page == "Files":
             current_sessions_df.to_excel(writer, index=False, sheet_name="Sesions")
         download_buffer.seek(0)
         st.download_button(
-            label="📥 Descargar datos actuales",
+            label="📥 Download current data",
             data=download_buffer.getvalue(),
             file_name="Individuals-Training.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     else:
-        st.info("No hay datos actuales en la fuente de sesiones.")
+        st.info("No current data in the sessions source.")
 
 
     # Función para validar y cargar el archivo Excel específico
     def validar_importar_excel(file_path):
         try:
-            print(f"Validando archivo: {file_path.name if hasattr(file_path, 'name') else file_path}")
+            print(f"Validating file: {file_path.name if hasattr(file_path, 'name') else file_path}")
             
             # Leer solo las primeras filas para verificar la estructura
             df_preview = pd.read_excel(file_path, nrows=5)
-            print("Primeras filas del archivo:")
+            print("First rows of the file:")
             print(df_preview.head())
-            print("\nColumnas del archivo:", df_preview.columns.tolist())
+            print("\nFile columns:", df_preview.columns.tolist())
             
             # Verificar si el archivo tiene datos
             if df_preview.empty:
                 st.markdown("""
                 <div style='background-color: #fff3cd; color: #856404; padding: 10px; border-radius: 5px;'>
-                    El archivo está vacío. Por favor, verifica que el archivo contenga datos.
+                    The file is empty. Please check that the file contains data.
                 </div>
                 """, unsafe_allow_html=True)
-                return False, "El archivo está vacío. Por favor, verifica que el archivo contenga datos."
+                return False, "The file is empty. Please check that the file contains data."
             
             # Verificar si el archivo tiene el formato esperado
-            expected_columns = ['Mes', 'Player', 'Individual Training', 'Meeting', 'Review Clips']
+            expected_columns = ['Month', 'Player', 'Individual Training', 'Meeting', 'Review Clips']
             
             # Verificar si alguna de las filas contiene los encabezados esperados
             header_row = None
@@ -1167,32 +1312,32 @@ elif page == "Files":
                     posibles_encabezados.append(columnas_archivo)
                     
                 except Exception as e:
-                    print(f"Error al leer el archivo con header={i}: {str(e)}")
+                    print(f"Error reading file with header={i}: {str(e)}")
                     continue
             
             if header_row is None:
                 # Si no se encontraron los encabezados, mostrar un mensaje de error detallado
                 error_msg = """
                 <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px; margin: 10px 0;'>
-                    <h4 style='margin-top: 0;'>❌ Error en el formato del archivo</h4>
-                    <p>El archivo no tiene el formato esperado. Asegúrate de que el archivo contenga las siguientes columnas:</p>
+                    <h4 style='margin-top: 0;'>❌ File format error</h4>
+                    <p>The file does not match the expected format. Make sure it contains the following columns:</p>
                     <ul style='margin-bottom: 10px;'>
-                        <li><strong>Mes</strong> (fecha de la actividad)</li>
-                        <li><strong>Player</strong> (nombre del jugador)</li>
-                        <li><strong>Individual Training</strong> (actividades de entrenamiento)</li>
-                        <li><strong>Meeting</strong> (reuniones)</li>
-                        <li><strong>Review Clips</strong> (revisión de videos)</li>
+                        <li><strong>Month</strong> (activity date)</li>
+                        <li><strong>Player</strong> (player name)</li>
+                        <li><strong>Individual Training</strong> (training activities)</li>
+                        <li><strong>Meeting</strong> (meetings)</li>
+                        <li><strong>Review Clips</strong> (video review)</li>
                     </ul>
-                    <p style='margin-bottom: 5px;'><strong>Consejos:</strong></p>
+                    <p style='margin-bottom: 5px;'><strong>Tips:</strong></p>
                     <ul style='margin-top: 5px;'>
-                        <li>Verifica que la primera fila contenga los encabezados</li>
-                        <li>Los nombres de las columnas deben coincidir exactamente (pueden variar mayúsculas y espacios)</li>
-                        <li>Las fechas deben estar en un formato reconocible (DD/MM/YYYY o YYYY-MM-DD)</li>
+                        <li>Check that the first row contains headers</li>
+                        <li>Column names must match exactly (case and spacing may vary)</li>
+                        <li>Dates must be in a recognizable format (DD/MM/YYYY or YYYY-MM-DD)</li>
                     </ul>
                 </div>
                 """
                 st.markdown(error_msg, unsafe_allow_html=True)
-                return False, "El archivo no tiene el formato esperado. Verifica que contenga las columnas requeridas."
+                return False, "The file does not have the expected format. Verify it includes required columns."
             
             # Leer el archivo completo con el encabezado correcto
             df = pd.read_excel(file_path, header=header_row)
@@ -1200,65 +1345,67 @@ elif page == "Files":
             # Limpiar los nombres de las columnas (eliminar espacios en blanco)
             df.columns = [str(col).strip() for col in df.columns]
             
-            # Verificar que las columnas requeridas estén presentes
-            required_columns = ['Mes', 'Player']
+            # Verify that required columns are present
+            date_col = next((c for c in ['Mes', 'Month', 'Date', 'Fecha'] if c in df.columns), None)
+            required_columns = ['Player']
             missing_columns = [col for col in required_columns if col not in df.columns]
             
-            if missing_columns:
+            if missing_columns or date_col is None:
+                missing_text = ', '.join(missing_columns) if missing_columns else 'Date column (Mes/Month/Date/Fecha)'
                 error_msg = f"""
                 <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px;'>
-                    <h4 style='margin-top: 0;'>❌ Columnas requeridas faltantes</h4>
-                    <p>Faltan las siguientes columnas requeridas: <strong>{', '.join(missing_columns)}</strong></p>
-                    <p>Por favor, asegúrate de que el archivo contenga al menos las columnas 'Mes' y 'Player'.</p>
-                    <p>Columnas encontradas en el archivo: {', '.join(df.columns) if len(df.columns) > 0 else 'Ninguna columna encontrada'}</p>
+                    <h4 style='margin-top: 0;'>❌ Missing required columns</h4>
+                    <p>The following required columns are missing: <strong>{missing_text}</strong></p>
+                    <p>Please ensure the file contains at least a date column (Mes/Month/Date/Fecha) and 'Player'.</p>
+                    <p>Columns found in file: {', '.join(df.columns) if len(df.columns) > 0 else 'No columns found'}</p>
                 </div>
                 """
                 st.markdown(error_msg, unsafe_allow_html=True)
-                return False, f"Faltan columnas requeridas: {', '.join(missing_columns)}"
+                return False, f"Missing required columns: {missing_text}"
             
-            # Verificar que haya al menos una columna de actividad
-            activity_columns = [col for col in df.columns if col not in ['Mes', 'Player']]
+            # Verify that there is at least one activity column
+            activity_columns = [col for col in df.columns if col not in [date_col, 'Player']]
             if not activity_columns:
                 error_msg = """
                 <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px;'>
-                    <h4 style='margin-top: 0;'>❌ No se encontraron actividades</h4>
-                    <p>No se encontraron columnas de actividades en el archivo.</p>
-                    <p>Asegúrate de que el archivo contenga al menos una columna de actividad (Individual Training, Meeting o Review Clips).</p>
+                    <h4 style='margin-top: 0;'>❌ No activities found</h4>
+                    <p>No activity columns found in the file.</p>
+                    <p>Ensure the file contains at least one activity column (Individual Training, Meeting, or Review Clips).</p>
                 </div>
                 """
                 st.markdown(error_msg, unsafe_allow_html=True)
-                return False, "No se encontraron columnas de actividades en el archivo."
+                return False, "No activity columns found in the file."
             
             # Verificar que haya al menos una fila con datos
             if df.empty:
                 error_msg = """
                 <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px;'>
-                    <h4 style='margin-top: 0;'>❌ Archivo vacío</h4>
-                    <p>El archivo está vacío o no contiene datos válidos.</p>
-                    <p>Por favor, verifica que el archivo tenga datos en las filas debajo de los encabezados.</p>
+                    <h4 style='margin-top: 0;'>❌ Empty file</h4>
+                    <p>The file is empty or contains no valid data.</p>
+                    <p>Please verify the file has data in rows below headers.</p>
                 </div>
                 """
                 st.markdown(error_msg, unsafe_allow_html=True)
-                return False, "El archivo está vacío o no contiene datos válidos."
+                return False, "The file is empty or contains no valid data."
             
             # Verificar que las fechas sean válidas
             try:
                 # Convertir la columna de fechas a datetime
-                df['fecha_dt'] = pd.to_datetime(df['Mes'], errors='coerce')
+                df['fecha_dt'] = pd.to_datetime(df[date_col], errors='coerce')
                 
                 # Verificar si hay fechas inválidas
                 if df['fecha_dt'].isna().any():
-                    fechas_invalidas = df[df['fecha_dt'].isna()]['Mes'].head().tolist()
+                    fechas_invalidas = df[df['fecha_dt'].isna()][date_col].head().tolist()
                     error_msg = f"""
                     <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px;'>
-                        <h4 style='margin-top: 0;'>❌ Fechas inválidas</h4>
-                        <p>Se encontraron fechas inválidas en la columna 'Mes'.</p>
-                        <p>Ejemplos de valores problemáticos: {', '.join(map(str, fechas_invalidas))}</p>
-                        <p>Asegúrate de que las fechas estén en un formato reconocible (ej: DD/MM/YYYY o YYYY-MM-DD).</p>
+                        <h4 style='margin-top: 0;'>❌ Invalid dates</h4>
+                        <p>Invalid dates were found in column '{date_col}'.</p>
+                        <p>Examples of problematic values: {', '.join(map(str, fechas_invalidas))}</p>
+                        <p>Ensure dates are in a recognizable format (e.g., DD/MM/YYYY or YYYY-MM-DD).</p>
                     </div>
                     """
                     st.markdown(error_msg, unsafe_allow_html=True)
-                    return False, f"Se encontraron fechas inválidas: {', '.join(map(str, fechas_invalidas[:3]))}..."
+                    return False, f"Invalid dates were found: {', '.join(map(str, fechas_invalidas[:3]))}..."
                 
                 # Verificar que las fechas estén en un rango razonable
                 fecha_min = pd.Timestamp('2020-01-01')
@@ -1269,14 +1416,14 @@ elif page == "Files":
                     ejemplos = fechas_fuera_de_rango['fecha_dt'].dt.strftime('%Y-%m-%d').head().tolist()
                     error_msg = f"""
                     <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px;'>
-                        <h4 style='margin-top: 0;'>❌ Fechas fuera de rango</h4>
-                        <p>Algunas fechas están fuera del rango permitido (01/01/2020 - {fecha_max.strftime('%d/%m/%Y')}).</p>
-                        <p>Fechas problemáticas: {', '.join(ejemplos)}</p>
-                        <p>Por favor, verifica que todas las fechas estén dentro del rango permitido.</p>
+                        <h4 style='margin-top: 0;'>❌ Dates out of range</h4>
+                        <p>Some dates are outside the allowed range (01/01/2020 - {fecha_max.strftime('%d/%m/%Y')}).</p>
+                        <p>Problematic dates: {', '.join(ejemplos)}</p>
+                        <p>Please verify all dates are within the allowed range.</p>
                     </div>
                     """
                     st.markdown(error_msg, unsafe_allow_html=True)
-                    return False, f"Fechas fuera de rango: {', '.join(ejemplos[:3])}..."
+                    return False, f"Dates out of range: {', '.join(ejemplos[:3])}..."
                 
                 # Formatear las fechas
                 df['fecha_formateada'] = df['fecha_dt'].dt.strftime('%Y-%m-%d')
@@ -1284,30 +1431,30 @@ elif page == "Files":
             except Exception as e:
                 error_msg = f"""
                 <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px;'>
-                    <h4 style='margin-top: 0;'>❌ Error al procesar las fechas</h4>
-                    <p>Ocurrió un error al procesar las fechas en la columna 'Mes'.</p>
+                    <h4 style='margin-top: 0;'>❌ Error processing dates</h4>
+                    <p>An error occurred while processing dates in column '{date_col}'.</p>
                     <p>Error: {str(e)}</p>
-                    <p>Por favor, verifica que todas las fechas estén en un formato válido y vuelve a intentarlo.</p>
+                    <p>Please verify all dates are in a valid format and try again.</p>
                 </div>
                 """
                 st.markdown(error_msg, unsafe_allow_html=True)
-                return False, f"Error al procesar las fechas: {str(e)}"
+                return False, f"Error processing dates: {str(e)}"
             
             # Verificar que haya al menos un jugador con nombre válido
             jugadores_invalidos = df[df['Player'].isna() | (df['Player'].astype(str).str.strip() == '')]
             if len(jugadores_invalidos) == len(df):
                 error_msg = """
                 <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px;'>
-                    <h4 style='margin-top: 0;'>❌ Nombres de jugadores inválidos</h4>
-                    <p>No se encontraron nombres de jugadores válidos en la columna 'Player'.</p>
-                    <p>Por favor, asegúrate de que la columna 'Player' contenga los nombres de los jugadores.</p>
+                    <h4 style='margin-top: 0;'>❌ Invalid player names</h4>
+                    <p>No valid player names were found in column 'Player'.</p>
+                    <p>Please ensure the 'Player' column contains player names.</p>
                 </div>
                 """
                 st.markdown(error_msg, unsafe_allow_html=True)
-                return False, "No se encontraron nombres de jugadores válidos en la columna 'Player'."
+                return False, "No valid player names were found in column 'Player'."
             
             # Verificar que haya al menos una actividad registrada
-            actividades = []
+            activities = []
             for _, fila in df.iterrows():
                 # Saltar filas sin jugador o con jugador vacío
                 if pd.isna(fila.get('Player')) or str(fila.get('Player', '')).strip() == '':
@@ -1315,113 +1462,113 @@ elif page == "Files":
                     
                 for col in activity_columns:
                     if pd.notna(fila.get(col)) and str(fila[col]).strip() != '':
-                        actividades.append({
+                        activities.append({
                             'fecha': fila['fecha_formateada'],
                             'jugador': str(fila['Player']).strip(),
                             'tipo': col,
                             'descripcion': str(fila[col]).strip()
                         })
             
-            if not actividades:
+            if not activities:
                 error_msg = """
                 <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px;'>
-                    <h4 style='margin-top: 0;'>❌ No hay actividades válidas</h4>
-                    <p>No se encontraron actividades válidas en el archivo.</p>
-                    <p>Asegúrate de que al menos una celda en las columnas de actividades contenga datos.</p>
+                    <h4 style='margin-top: 0;'>❌ No valid activities</h4>
+                    <p>No valid activities were found in the file.</p>
+                    <p>Ensure at least one cell in activity columns contains data.</p>
                 </div>
                 """
                 st.markdown(error_msg, unsafe_allow_html=True)
-                return False, "No se encontraron actividades válidas en el archivo."
+                return False, "No valid activities were found in the file."
             
-            # Crear el DataFrame final con las actividades
-            df_actividades = pd.DataFrame(actividades)
+            # Crear el DataFrame final con las activities
+            df_activities = pd.DataFrame(activities)
             
             # Verificar que tengamos al menos una actividad válida
-            if df_actividades.empty:
+            if df_activities.empty:
                 error_msg = """
                 <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px;'>
-                    <h4 style='margin-top: 0;'>❌ No se pudieron procesar las actividades</h4>
-                    <p>No se encontraron actividades válidas para importar.</p>
-                    <p>Por favor, verifica que el archivo tenga el formato correcto e inténtalo de nuevo.</p>
+                    <h4 style='margin-top: 0;'>❌ Could not process activities</h4>
+                    <p>No valid activities were found para importar.</p>
+                    <p>Please verify the file format and try again.</p>
                 </div>
                 """
                 st.markdown(error_msg, unsafe_allow_html=True)
-                return False, "No se pudieron procesar las actividades. Verifica el formato del archivo."
+                return False, "Could not process activities. Check the file format."
             
             # Guardar dataset tabular validado para subirlo a la pestaña Sesions.
             st.session_state["training_import_raw_df"] = df.copy()
-            return True, df_actividades
+            return True, df_activities
             
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
-            print(f"Error al procesar el archivo: {error_details}")
+            print(f"Error processing file: {error_details}")
             
             # Mensaje de error más amigable
             mensaje_error = f"""
             <div style='background-color: #f8d7da; color: #721c24; padding: 15px; border-radius: 5px;'>
-                <h4 style='margin-top: 0;'>❌ Error al procesar el archivo</h4>
-                <p>Ocurrió un error al intentar procesar el archivo. Por favor, verifica que el archivo cumpla con el formato esperado.</p>
-                <p><strong>Detalles del error:</strong> {str(e)}</p>
-                <p>Si el problema persiste, intenta:</p>
+                <h4 style='margin-top: 0;'>❌ Error processing file</h4>
+                <p>An error occurred while processing the file. Please verify it matches the expected format.</p>
+                <p><strong>Error details:</strong> {str(e)}</p>
+                <p>If the problem persists, try:</p>
                 <ul>
-                    <li>Descargar la plantilla de ejemplo y usar ese formato</li>
-                    <li>Verificar que el archivo no esté dañado</li>
-                    <li>Comprobar que no tenga fórmulas o formatos especiales</li>
+                    <li>Download the sample template and use that format</li>
+                    <li>Check that the file is not corrupted</li>
+                    <li>Check that it has no formulas or special formatting</li>
                 </ul>
             </div>
             """
             return False, mensaje_error
     
     # Sección para importar datos desde Excel
-    with st.expander("📤 Importar Datos desde Excel", expanded=False):
-        st.markdown("### Instrucciones para la importación")
+    with st.expander("📤 Import Data from Excel", expanded=False):
+        st.markdown("### Import instructions")
         st.markdown("""
-        1. **Formato del archivo**: El archivo Excel debe tener la siguiente estructura:
-           - **Columna 1 (A)**: Fecha de la actividad (formato de fecha reconocible)
-           - **Columna 2 (B)**: Nombre del jugador
-           - **Columna 3 (C)**: Detalles del entrenamiento individual (opcional)
-           - **Columna 4 (D)**: Detalles de la reunión (opcional)
-           - **Columna 5 (E)**: Detalles de la revisión de videos (opcional)
+        1. **File format**: The Excel file must have the following structure:
+           - **Column 1 (A)**: Date de la actividad (formato de fecha reconocible)
+           - **Column 2 (B)**: Player name
+           - **Column 3 (C)**: Individual training details (optional)
+           - **Column 4 (D)**: Meeting details (optional)
+           - **Column 5 (E)**: Review clips details (optional)
         
-        2. **Requisitos**:
-           - El archivo debe estar en formato .xlsx
-           - La primera fila debe contener los encabezados
-           - Al menos una actividad debe estar registrada en las columnas 3-5
-           - Las fechas deben estar entre 2020 y el año siguiente al actual
+        2. **Requirements**:
+           - The file must be in .xlsx format
+           - The first row must contain headers
+           - At least one activity must be registered in columns 3-5
+           - Dates must be between 2020 and next year
         
-        3. **Consejos**:
-           - Asegúrate de que los nombres de los jugadores sean consistentes
-           - Revisa que las fechas tengan el formato correcto
-           - Verifica que al menos una celda de actividad contenga información
+        3. **Tips**:
+           - Make sure player names are consistent
+           - Check that dates have the correct format
+           - Verify that at least one activity cell contains information
         """)
         
         st.markdown("---")
-        st.markdown("### Cargar archivo Excel")
+        st.markdown("### Upload Excel file")
         uploaded_file = st.file_uploader(
-            "Selecciona un archivo Excel (.xlsx)", 
+            "Select an Excel file (.xlsx)", 
             type=["xlsx"],
-            help="Haz clic o arrastra un archivo Excel con el formato especificado"
+            help="Click or drag an Excel file with the expected format"
         )
         
         if uploaded_file is not None:
             # Mostrar información del archivo
             file_name = uploaded_file.name
-            file_size = len(uploaded_file.getvalue()) / 1024  # Tamaño en KB
+            file_size = len(uploaded_file.getvalue()) / 1024  # Size en KB
             
             # Mostrar información del archivo en un contenedor con estilo
             with st.container():
                 col1, col2 = st.columns([1, 3])
                 with col1:
-                    st.metric("Archivo", file_name)
+                    st.metric("File", file_name)
                 with col2:
-                    st.metric("Tamaño", f"{file_size:.1f} KB")
+                    st.metric("Size", f"{file_size:.1f} KB")
                 
                 # Botón para validar el archivo
-                st.markdown("### Validar y Procesar")
+                st.markdown("### Validate and process")
                 
-                if st.button("🔍 Validar Archivo", key="validar_archivo", help="Validar la estructura y los datos del archivo"):
-                    with st.spinner("Validando archivo, por favor espere..."):
+                if st.button("🔍 Validate file", key="validar_archivo", help="Validate file structure and data"):
+                    with st.spinner("Validating file, please wait..."):
                         try:
                             # Validar y procesar el archivo
                             es_valido, resultado = validar_importar_excel(uploaded_file)
@@ -1439,7 +1586,7 @@ elif page == "Files":
                             
                             # No hacemos rerun aquí para evitar problemas con el estado
                         except Exception as e:
-                            st.error(f"❌ Error inesperado al validar el archivo: {str(e)}")
+                            st.error(f"❌ Unexpected error while validating file: {str(e)}")
                             st.session_state['archivo_validado'] = False
                             st.session_state['resultado_validacion'] = str(e)
                             st.session_state['training_import_raw_df'] = None
@@ -1447,59 +1594,59 @@ elif page == "Files":
                 # Si ya se validó el archivo, mostrar los resultados
                 if st.session_state.get('archivo_validado', False):
                     resultado = st.session_state['resultado_validacion']
-                    st.success("✅ Validación exitosa")
+                    st.success("✅ Validation successful")
                     
-                    # Mostrar estadísticas de las actividades a importar
-                    st.markdown("#### Resumen de Importación")
+                    # Mostrar estadísticas de las activities a importar
+                    st.markdown("#### Import summary")
                     
                     # Calcular estadísticas
-                    total_actividades = len(resultado)
+                    total_activities = len(resultado)
                     jugadores_unicos = resultado['jugador'].nunique()
                     fechas_unicas = resultado['fecha'].nunique()
-                    actividades_por_tipo = resultado['tipo'].value_counts().to_dict()
+                    activities_por_tipo = resultado['tipo'].value_counts().to_dict()
                     
                     # Mostrar métricas
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("📊 Total Actividades", total_actividades)
+                        st.metric("📊 Total activities", total_activities)
                     with col2:
-                        st.metric("👥 Jugadores Únicos", jugadores_unicos)
+                        st.metric("👥 Unique players", jugadores_unicos)
                     with col3:
-                        st.metric("📅 Días con Actividades", fechas_unicas)
+                        st.metric("📅 Days with activities", fechas_unicas)
                     
                     # Mostrar distribución por tipo de actividad
-                    st.markdown("#### Distribución por Tipo de Actividad")
-                    for tipo, cantidad in actividades_por_tipo.items():
-                        st.progress(cantidad / total_actividades, f"{tipo}: {cantidad} actividades")
+                    st.markdown("#### Distribution by Activity Type")
+                    for tipo, cantidad in activities_por_tipo.items():
+                        st.progress(cantidad / total_activities, f"{tipo}: {cantidad} activities")
                     
                     # Vista previa de los datos
-                    st.markdown("#### Vista Previa de los Datos")
+                    st.markdown("#### Data preview")
                     st.dataframe(resultado.head(10), 
                                 use_container_width=True,
                                 column_config={
-                                    'fecha': 'Fecha',
-                                    'jugador': 'Jugador',
-                                    'tipo': 'Tipo de Actividad',
-                                    'descripcion': 'Descripción'
+                                    'fecha': 'Date',
+                                    'jugador': 'Player',
+                                    'tipo': 'Activity Type',
+                                    'descripcion': 'Description'
                                 })
                     
                     # Botones de confirmación y cancelación
                     col1, col2 = st.columns(2)
                     with col1:
-                        if st.button("✅ Confirmar Importación", type="primary", key="confirmar_importacion"):
+                        if st.button("✅ Confirm import", type="primary", key="confirmar_importacion"):
                             try:
-                                st.info("Procesando la importación, por favor espere...")
+                                st.info("Processing import, please wait...")
                                 raw_df_to_save = st.session_state.get("training_import_raw_df")
 
                                 if raw_df_to_save is None or raw_df_to_save.empty:
                                     uploaded_file = st.session_state.get("archivo_cargado")
                                     if uploaded_file is None:
-                                        raise ValueError("No hay archivo validado para importar.")
+                                        raise ValueError("No validated file available to import.")
                                     uploaded_file.seek(0)
                                     raw_df_to_save = pd.read_excel(uploaded_file)
 
                                 destination = _save_sessions_raw_df(raw_df_to_save)
-                                st.success(f"✅ ¡Datos guardados exitosamente en {destination}!")
+                                st.success(f"✅ Data saved successfully to {destination}!")
 
                                 # Limpiar cachés específicos
                                 if 'load_training_data' in globals():
@@ -1514,26 +1661,26 @@ elif page == "Files":
                                 # Mostrar opción para descargar un reporte
                                 csv = resultado.to_csv(index=False).encode('utf-8')
                                 st.download_button(
-                                    label="📥 Descargar Reporte en CSV",
+                                    label="📥 Download CSV report",
                                     data=csv,
-                                    file_name=f"reporte_actividades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                    file_name=f"reporte_activities_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                                     mime='text/csv',
-                                    help="Descargar un reporte detallado de las actividades importadas"
+                                    help="Descargar un reporte detallado de las activities importadas"
                                 )
 
                                 st.session_state['archivo_validado'] = False
                                 st.session_state['resultado_validacion'] = None
                                 st.session_state['archivo_cargado'] = None
                                 st.session_state['training_import_raw_df'] = None
-                                st.success("✅ ¡Importación completada con éxito!")
+                                st.success("✅ Import completed successfully!")
 
                             except Exception as e:
-                                st.error(f"❌ Error al guardar la importación: {str(e)}")
+                                st.error(f"❌ Error saving import: {str(e)}")
                                 import traceback
                                 st.text(traceback.format_exc())
                     
                     with col2:
-                        if st.button("❌ Cancelar", key="cancelar_importacion"):
+                        if st.button("❌ Cancel", key="cancelar_importacion"):
                             st.session_state['archivo_validado'] = False
                             st.session_state['resultado_validacion'] = None
                             st.session_state['archivo_cargado'] = None
@@ -1548,24 +1695,24 @@ elif page == "Files":
                     elif hasattr(error_msg, 'message') and isinstance(error_msg.message, str):
                         st.error(f"❌ {error_msg.message}")
                     else:
-                        st.error("❌ Error en la validación del archivo")
+                        st.error("❌ File validation error")
                     
                     # Mostrar consejos para solucionar el problema
-                    st.markdown("### ¿Cómo solucionar el problema?")
+                    st.markdown("### How to fix the issue")
                     st.markdown("""
-                    1. **Verifica el formato del archivo**: Asegúrate de que el archivo tenga al menos 5 columnas.
-                    2. **Revisa las fechas**: Las fechas deben estar en un formato reconocible (ej: DD/MM/YYYY).
-                    3. **Comprueba los nombres de los jugadores**: La segunda columna debe contener nombres de jugadores.
-                    4. **Asegúrate de que haya datos**: Al menos una de las columnas 3-5 debe contener información.
-                    5. **Descarga la plantilla de ejemplo** si necesitas una referencia.
+                    1. **Check the file format**: Make sure the file has at least 5 columns.
+                    2. **Review dates**: Dates must be in a recognizable format (e.g., DD/MM/YYYY).
+                    3. **Check player names**: The second column must contain player names.
+                    4. **Make sure there is data**: At least one of columns 3-5 must contain information.
+                    5. **Download the sample template** if you need a reference.
                     
-                    - Debe ser un archivo Excel (.xlsx o .xls)
-                    - Debe contener las columnas: 'Mes', 'Player', 'Individual Training', 'Meeting', 'Review Clips'
-                    - La columna 'Mes' debe contener fechas válidas
-                    - Debe haber al menos un jugador y una actividad registrada
+                    - Must be an Excel file (.xlsx or .xls)
+                    - It must contain columns: 'Month', 'Player', 'Individual Training', 'Meeting', 'Review Clips'
+                    - The 'Month' column must contain valid dates
+                    - There must be at least one player and one recorded activity
                     """)
                 
                 # Manejo de errores general
                 if 'error_importacion' in st.session_state:
-                    st.error(f"Ocurrió un error al procesar el archivo: {st.session_state['error_importacion']}")
+                    st.error(f"An error occurred while processing the file: {st.session_state['error_importacion']}")
                     del st.session_state['error_importacion']

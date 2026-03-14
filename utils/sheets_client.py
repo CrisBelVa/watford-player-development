@@ -67,7 +67,18 @@ class GoogleSheetsClient:
         if not values:
             return pd.DataFrame(columns=list(expected_columns or []))
 
-        header = [str(c).strip() for c in values[0]]
+        header_row = values[0] if len(values) > 0 else []
+        if isinstance(header_row, (list, tuple)):
+            header_cells = list(header_row)
+        elif header_row is None:
+            header_cells = []
+        else:
+            header_cells = [header_row]
+        header = [str(c).strip() for c in header_cells]
+        if not header:
+            header = list(expected_columns or [])
+            if not header:
+                return pd.DataFrame()
         header = [c if c else f"column_{i + 1}" for i, c in enumerate(header)]
 
         rows = values[1:]
@@ -216,10 +227,14 @@ class GoogleSheetsClient:
         return self._client
 
     @staticmethod
-    def _pad_row(row: list, width: int) -> list:
+    def _pad_row(row: object, width: int) -> list:
+        if row is None:
+            return [""] * max(width, 0)
+        if not isinstance(row, (list, tuple)):
+            row = [row]
         if len(row) >= width:
-            return row[:width]
-        return row + [""] * (width - len(row))
+            return list(row[:width])
+        return list(row) + [""] * (width - len(row))
 
     @staticmethod
     def _to_sheet_cell(value):

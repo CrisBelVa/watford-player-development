@@ -154,10 +154,6 @@ st.markdown("""
         div[data-testid="stSidebarNav"] {
             display: none !important;
         }
-        /* Requested UI tweak 
-        .st-emotion-cache-zy6yx3 {
-            padding: 0rem !important;
-        }*/
     </style>
 """, unsafe_allow_html=True)
 
@@ -173,10 +169,11 @@ def inject_sidebar_logo():
             div[data-testid="stSidebarHeader"] {{
                 background-image: url('data:image/png;base64,{b64}');
                 background-repeat: no-repeat;
-                background-position: center;
-                background-size: 90% auto;
-                min-height: 100px;
-                margin-bottom: 0.25rem;
+                background-position: center center;
+                background-size: contain;
+                min-height: 130px;
+                padding: 10px 8px 8px 8px;
+                margin-bottom: 0.4rem;
             }}
             </style>
         """, unsafe_allow_html=True)
@@ -184,6 +181,51 @@ def inject_sidebar_logo():
         pass
 
 inject_sidebar_logo()
+
+# Login page visual polish (UI only; no functional changes)
+st.markdown("""
+    <style>
+        section[data-testid="stSidebar"] {
+            border-right: 1px solid #d8d8d8;
+            background: #f0f2f6;
+        }
+
+        [data-testid="stAppViewContainer"] {
+            background: #f0f2f6;
+        }
+
+        .main .block-container {
+            max-width: 1180px;
+            padding-top: 2.2rem;
+        }
+
+        h1 {
+            letter-spacing: 0.2px;
+            font-weight: 800;
+            color: #1f2430;
+            margin-bottom: 0.3rem;
+        }
+
+        h3 {
+            color: #262b38;
+            margin-top: 0.6rem;
+        }
+
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border: 1px solid #d0d4da !important;
+            border-radius: 14px !important;
+            background: #ffffff;
+            box-shadow: 0 3px 12px rgba(15, 23, 42, 0.07);
+        }
+
+        div[data-testid="stSelectbox"] > div > div,
+        div[data-testid="stTextInput"] > div > div {
+            border-radius: 10px !important;
+            background-color: #ffffff !important;
+            border: 1px solid #cdd3db !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
 st.title("Watford Player Development")
 
