@@ -61,6 +61,7 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
     Returns a dict keyed by a staff-facing label, with values containing id and name.
     """
     try:
+        empty_players: Dict[str, Dict[str, Any]] = {}
         players_df = None
         sheets_client = get_sheets_client()
         if sheets_client.is_configured():
@@ -82,15 +83,28 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
                 )
             else:
                 st.warning("No players source found. Configure tab 'Players' in Google Sheets or upload local file.")
-                return {}
+                return empty_players
+
+        if not isinstance(players_df, pd.DataFrame):
+            try:
+                players_df = pd.DataFrame(players_df)
+            except Exception:
+                st.error("❌ Players source format is invalid. Please review tab 'Players'.")
+                return empty_players
+        if players_df is None:
+            return empty_players
 
         # Normalize column names
-        players_df.columns = [c.strip() for c in players_df.columns]
+        try:
+            players_df.columns = [str(c).strip() for c in list(players_df.columns)]
+        except Exception:
+            st.error("❌ Players source has invalid headers. Please review tab 'Players'.")
+            return empty_players
 
         # Validate columns
         if 'playerName' not in players_df.columns:
             st.error("❌ Column 'playerName' is required in the players file.")
-            return {}
+            return empty_players
 
         # activo handling
         if 'activo' in players_df.columns:
@@ -137,7 +151,7 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
         st.error(f"❌ Error loading players list: {e}")
         import traceback
         st.error(traceback.format_exc())
-        return {}
+        return empty_players
 
 
 def resolve_current_player(is_staff: bool) -> Tuple[str, str]:

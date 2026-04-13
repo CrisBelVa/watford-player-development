@@ -161,6 +161,7 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
     Normalizes playerId to STRING (or None) to avoid dtype issues in the UI.
     """
     try:
+        empty_players: Dict[str, Dict[str, Any]] = {}
         players_df = None
         sheets_client = get_sheets_client()
         if sheets_client.is_configured():
@@ -185,15 +186,28 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
                 )
             else:
                 st.warning("No players source found. Configure Google Sheets tab 'Players' or local CSV/XLSX.")
-                return {}
+                return empty_players
 
-        players_df.columns = [str(c).strip() for c in players_df.columns]
+        if not isinstance(players_df, pd.DataFrame):
+            try:
+                players_df = pd.DataFrame(players_df)
+            except Exception:
+                st.error("❌ Players source format is invalid. Please review tab 'Players'.")
+                return empty_players
+        if players_df is None:
+            return empty_players
+
+        try:
+            players_df.columns = [str(c).strip() for c in list(players_df.columns)]
+        except Exception:
+            st.error("❌ Players source has invalid headers. Please review tab 'Players'.")
+            return empty_players
         if "internal_id" not in players_df.columns:
             players_df["internal_id"] = None
 
         if 'playerName' not in players_df.columns:
             st.error("❌ Column 'playerName' is required in the players file.")
-            return {}
+            return empty_players
 
         if 'activo' in players_df.columns:
             players_df['activo'] = pd.to_numeric(players_df['activo'], errors='coerce').fillna(1).astype(int)
@@ -239,7 +253,7 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
         st.error(f"❌ Error loading players source: {e}")
         import traceback
         st.error(traceback.format_exc())
-        return {}
+        return empty_players
 
 def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
     """

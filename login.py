@@ -41,6 +41,7 @@ def load_players_for_login():
     - Keeps only players that have WhoScored `playerId` for player login
     Returns a DataFrame with at least these columns.
     """
+    empty_df = pd.DataFrame(columns=["internal_id", "playerId", "playerName", "activo"])
     try:
         df = None
         sheets_client = get_sheets_client()
@@ -68,7 +69,7 @@ def load_players_for_login():
                     "Players source not found. Configure Google Sheets (tab 'Players') "
                     "or add watford_players_login_info.xlsx/CSV locally."
                 )
-                return pd.DataFrame(columns=["internal_id", "playerId", "playerName", "activo"])
+                return empty_df
 
             file_path = existing[0]
             if file_path.lower().endswith(".csv"):
@@ -83,13 +84,29 @@ def load_players_for_login():
                     },
                 )
 
+        if not isinstance(df, pd.DataFrame):
+            try:
+                df = pd.DataFrame(df)
+            except Exception:
+                st.error(
+                    "Players source format is invalid. "
+                    "Expected a table-like source (Google Sheets tab 'Players' or local CSV/XLSX)."
+                )
+                return empty_df
+        if df is None:
+            return empty_df
+
         # Normalize columns
-        df.columns = [str(c).strip() for c in df.columns]
+        try:
+            df.columns = [str(c).strip() for c in list(df.columns)]
+        except Exception:
+            st.error("Players source has invalid headers. Please review tab 'Players'.")
+            return empty_df
 
         # Ensure required columns
         if 'playerName' not in df.columns:
             st.error("The players file requires a 'playerName' column.")
-            return pd.DataFrame(columns=["internal_id", "playerId", "playerName", "activo"]) 
+            return empty_df 
 
         if 'internal_id' not in df.columns:
             df['internal_id'] = None
@@ -127,7 +144,7 @@ def load_players_for_login():
         return df
     except Exception as e:
         st.error(f"Error loading players source: {e}")
-        return pd.DataFrame(columns=["internal_id", "playerId", "playerName", "activo"]) 
+        return empty_df 
 
 # --- Load Staff Users ---
 @st.cache_data(ttl=600)

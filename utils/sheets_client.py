@@ -59,13 +59,27 @@ class GoogleSheetsClient:
         sheet_name: str,
         expected_columns: Optional[Iterable[str]] = None,
     ) -> pd.DataFrame:
+        expected_cols: list[str] = []
+        if expected_columns is not None:
+            try:
+                expected_cols = [str(col).strip() for col in expected_columns]
+            except TypeError:
+                expected_cols = []
+
         ws = self._get_worksheet(sheet_name, create_if_missing=False)
         if ws is None:
-            return pd.DataFrame(columns=list(expected_columns or []))
+            return pd.DataFrame(columns=expected_cols)
 
         values = ws.get_all_values()
+        if values is None:
+            return pd.DataFrame(columns=expected_cols)
+        if not isinstance(values, (list, tuple)):
+            try:
+                values = list(values)
+            except TypeError:
+                return pd.DataFrame(columns=expected_cols)
         if not values:
-            return pd.DataFrame(columns=list(expected_columns or []))
+            return pd.DataFrame(columns=expected_cols)
 
         header_row = values[0] if len(values) > 0 else []
         if isinstance(header_row, (list, tuple)):
@@ -76,12 +90,19 @@ class GoogleSheetsClient:
             header_cells = [header_row]
         header = [str(c).strip() for c in header_cells]
         if not header:
-            header = list(expected_columns or [])
+            header = expected_cols.copy()
             if not header:
                 return pd.DataFrame()
         header = [c if c else f"column_{i + 1}" for i, c in enumerate(header)]
 
-        rows = values[1:]
+        rows = values[1:] if len(values) > 1 else []
+        if rows is None:
+            rows = []
+        if not isinstance(rows, (list, tuple)):
+            try:
+                rows = list(rows)
+            except TypeError:
+                rows = []
         normalized_rows = [self._pad_row(r, len(header)) for r in rows]
         df = pd.DataFrame(normalized_rows, columns=header)
 
@@ -93,8 +114,8 @@ class GoogleSheetsClient:
             )
             df = df.loc[keep_mask].reset_index(drop=True)
 
-        if expected_columns:
-            for col in expected_columns:
+        if expected_cols:
+            for col in expected_cols:
                 if col not in df.columns:
                     df[col] = None
 
