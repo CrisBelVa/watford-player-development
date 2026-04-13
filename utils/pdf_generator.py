@@ -28,6 +28,9 @@ class WatfordPlayerReport(FPDF):
         self.logo_path = logo_path
         self.background_image_path = background_image_path  # ← NUEVO
         self.player_photo_path = player_photo_path
+        self.cover_position = None
+        self.cover_filters = {}
+        self.cover_match_count = None
         self.set_auto_page_break(auto=True, margin=15)
         
         # Colores Watford
@@ -38,6 +41,11 @@ class WatfordPlayerReport(FPDF):
         self.COLOR_BLACK = (0, 0, 0)
         self.COLOR_WHITE = (255, 255, 255)
         self.COLOR_RED = (237, 28, 36)  # ← NUEVO
+        self.COLOR_CHARCOAL = (30, 34, 40)
+        self.COLOR_LIGHT_BG = (244, 246, 248)
+        self.COLOR_MUTED_TEXT = (78, 86, 96)
+        self.COLOR_CARD_BORDER = (190, 196, 204)
+        self.COLOR_CARD_SHADOW = (210, 214, 220)
 
         
     def header(self):
@@ -77,75 +85,157 @@ class WatfordPlayerReport(FPDF):
             page_text = f'Page {self.page_no() - 1}'
             self.cell(0, 10, page_text, 0, 0, 'R')
 
-    def _draw_cover_player_photo(self, x=205, y=86, size=72):
-        if not self.player_photo_path:
-            return
-        if not os.path.exists(self.player_photo_path):
-            return
-        try:
-            self.set_fill_color(*self.COLOR_WHITE)
-            self.rect(x - 2, y - 2, size + 4, size + 4, 'F')
-            self.set_draw_color(*self.COLOR_YELLOW)
-            self.set_line_width(1.2)
-            self.rect(x - 2, y - 2, size + 4, size + 4, 'D')
-            self.image(self.player_photo_path, x=x, y=y, w=size, h=size)
-        except Exception as e:
-            print(f"Error loading player cover photo: {e}")
+    def _draw_cover_player_photo(self, x=188, y=48, card_w=92, card_h=122):
+        # Soft shadow + white photo card for a cleaner cover look.
+        self.set_fill_color(*self.COLOR_CARD_SHADOW)
+        self.rect(x + 1.8, y + 1.8, card_w, card_h, 'F')
+        self.set_fill_color(*self.COLOR_WHITE)
+        self.rect(x, y, card_w, card_h, 'F')
+        self.set_draw_color(*self.COLOR_CARD_BORDER)
+        self.set_line_width(0.5)
+        self.rect(x, y, card_w, card_h, 'D')
+
+        photo_size = 78
+        photo_x = x + (card_w - photo_size) / 2
+        photo_y = y + 8
+        has_photo = self.player_photo_path and os.path.exists(self.player_photo_path)
+
+        if has_photo:
+            try:
+                self.image(self.player_photo_path, x=photo_x, y=photo_y, w=photo_size, h=photo_size)
+            except Exception as e:
+                print(f"Error loading player cover photo: {e}")
+                has_photo = False
+
+        if not has_photo:
+            self.set_fill_color(235, 238, 242)
+            self.rect(photo_x, photo_y, photo_size, photo_size, 'F')
+            self.set_draw_color(200, 205, 212)
+            self.rect(photo_x, photo_y, photo_size, photo_size, 'D')
+            self.set_xy(photo_x, photo_y + (photo_size / 2) - 3)
+            self.set_font('Arial', 'B', 9)
+            self.set_text_color(*self.COLOR_MUTED_TEXT)
+            self.cell(photo_size, 6, 'NO PHOTO', 0, 0, 'C')
+
+        self.set_xy(x, y + card_h - 25)
+        self.set_font('Arial', 'B', 10)
+        self.set_text_color(*self.COLOR_BLACK)
+        self.cell(card_w, 6, 'PLAYER PROFILE', 0, 1, 'C')
+        self.set_x(x)
+        self.set_font('Arial', '', 8)
+        self.set_text_color(*self.COLOR_MUTED_TEXT)
+        self.cell(card_w, 5, 'Official report cover', 0, 0, 'C')
 
     def cover_page(self):
         """
-        Portada estilo MAX ALLEYNE (Individual Development)
-        - Franja gris izquierda con logo
-        - Línea roja vertical
-        - Imagen de fondo (Watford_portada_d.jpg)
-        - Nombre del jugador en blanco
+        Professional first page with neutral palette and clean player photo card.
         """
+        # Avoid automatic page break while drawing the full-cover composition.
+        self.set_auto_page_break(auto=False)
         self.add_page()
-        
-        # Franja gris izquierda
-        self.set_fill_color(*self.COLOR_GRAY_BG)
-        self.rect(0, 0, 60, 210, 'F')
-        
-        # Línea roja vertical
+
+        # Base background and branding strip
+        self.set_fill_color(*self.COLOR_LIGHT_BG)
+        self.rect(0, 0, 297, 210, 'F')
+        left_strip_w = 78
+        self.set_fill_color(*self.COLOR_CHARCOAL)
+        self.rect(0, 0, left_strip_w, 210, 'F')
         self.set_fill_color(*self.COLOR_RED)
-        self.rect(60, 0, 3, 210, 'F')
-        
-        # Logo en franja gris
+        self.rect(left_strip_w, 0, 2.5, 210, 'F')
+
+        # Logo
         try:
             if os.path.exists(self.logo_path):
-                self.image(self.logo_path, x=10, y=15, w=40)
+                self.image(self.logo_path, x=14, y=14, w=48)
         except:
             pass
-        
-        # Texto "PLAYER STATS\nREPORT" en franja gris
-        self.set_xy(5, 90)
-        self.set_font('Arial', 'B', 14)
-        self.set_text_color(*self.COLOR_WHITE)
-        self.multi_cell(50, 8, 'PLAYER STATS\nREPORT', 0, 'C')
-        
-        # Nombre del autor/generador
-        self.set_xy(5, 180)
-        self.set_font('Arial', '', 12)
-        self.set_text_color(*self.COLOR_WHITE)
-        self.cell(50, 8, 'ALBERTO GARRIDO', 0, 0, 'C')
-        
-        # Imagen de fondo (Watford_portada_d.jpg)
-        try:
-            if self.background_image_path and os.path.exists(self.background_image_path):
-                # ✅ NO forzar ancho completo - dejar que se centre naturalmente
-                # La imagen tiene el escudo centrado, así que usamos su proporción original
-                self.image(self.background_image_path, x=63, y=0, h=210)  # ← SOLO altura, NO ancho
-        except Exception as e:
-            print(f"Error loading background: {e}")
 
-        # Optional player portrait on cover.
-        self._draw_cover_player_photo()
-        
-        # Nombre del jugador (sobre la imagen, arriba a la derecha)
-        self.set_xy(150, 20)
-        self.set_font('Arial', 'B', 32)
+        # Left strip text
+        self.set_xy(12, 88)
+        self.set_font('Arial', 'B', 13)
         self.set_text_color(*self.COLOR_WHITE)
-        self.cell(130, 15, self.player_name.upper(), 0, 0, 'R')
+        self.multi_cell(left_strip_w - 24, 7, 'PLAYER\nPERFORMANCE\nREPORT', 0, 'L')
+        # Keep this inside safe printable area to avoid spill to a second page.
+        self.set_xy(12, 186)
+        self.set_font('Arial', '', 9)
+        self.set_text_color(188, 194, 201)
+        self.cell(left_strip_w - 24, 6, 'Watford FC Analytics', 0, 0, 'L')
+
+        # Title block (right side)
+        content_x = left_strip_w + 12
+        self.set_xy(content_x, 24)
+        self.set_font('Arial', '', 11)
+        self.set_text_color(*self.COLOR_MUTED_TEXT)
+        self.cell(96, 6, 'Watford FC Academy', 0, 1, 'L')
+        self.set_x(content_x)
+        name_len = len(str(self.player_name or ""))
+        name_font_size = 31
+        if name_len > 22:
+            name_font_size = 29
+        if name_len > 30:
+            name_font_size = 27
+        self.set_font('Arial', 'B', name_font_size)
+        self.set_text_color(*self.COLOR_CHARCOAL)
+        self.cell(102, 13, self.player_name.upper(), 0, 1, 'L')
+        self.set_x(content_x)
+        self.set_font('Arial', '', 15)
+        self.set_text_color(*self.COLOR_MUTED_TEXT)
+        self.cell(105, 10, 'Player Statistics Report', 0, 1, 'L')
+
+        # Context values for compact info panel
+        position_text = str(self.cover_position).strip() if self.cover_position else "Not specified"
+        season = self.cover_filters.get('season')
+        season_text = str(season).strip() if season else "All seasons"
+        start_date = self.cover_filters.get('delta_start_date', self.cover_filters.get('start_date'))
+        end_date = self.cover_filters.get('delta_end_date', self.cover_filters.get('end_date'))
+        period_text = f"{start_date} - {end_date}" if (start_date and end_date) else "Full range"
+        matches_text = str(self.cover_match_count) if isinstance(self.cover_match_count, int) else "-"
+
+        # Compact info panel to avoid large empty space between separators.
+        info_x = content_x
+        info_y = 84
+        info_w = 88
+        info_h = 56
+        self.set_fill_color(236, 239, 243)
+        self.rect(info_x, info_y, info_w, info_h, 'F')
+        self.set_draw_color(214, 219, 225)
+        self.set_line_width(0.5)
+        self.rect(info_x, info_y, info_w, info_h, 'D')
+
+        info_rows = [
+            ("Position", position_text),
+            ("Season", season_text),
+            ("Period", period_text),
+            ("Matches", matches_text),
+        ]
+        y_cursor = info_y + 6
+        for label, value in info_rows:
+            self.set_xy(info_x + 3, y_cursor)
+            self.set_font('Arial', 'B', 8)
+            self.set_text_color(96, 104, 114)
+            self.cell(22, 4.5, f"{label}:", 0, 0, 'L')
+
+            self.set_font('Arial', '', 8)
+            self.set_text_color(56, 62, 70)
+            self.cell(info_w - 28, 4.5, str(value), 0, 1, 'L')
+            y_cursor += 12
+
+        # Subtle separators for hierarchy
+        self.set_draw_color(215, 220, 226)
+        self.set_line_width(0.6)
+        self.line(content_x, 78, 178, 78)
+        self.line(content_x, 146, 178, 146)
+
+        # Generated date
+        generated_date = datetime.now().strftime("%B %d, %Y")
+        self.set_xy(content_x, 186)
+        self.set_font('Arial', '', 10)
+        self.set_text_color(*self.COLOR_MUTED_TEXT)
+        self.cell(120, 6, f'Generated {generated_date}', 0, 0, 'L')
+
+        # Player portrait card
+        self._draw_cover_player_photo()
+        self.set_auto_page_break(auto=True, margin=15)
     
     def filters_page(self, filters_data):
         """
@@ -871,6 +961,11 @@ def generate_player_report(
     """
     # Crear PDF CON BACKGROUND
     pdf = WatfordPlayerReport(player_name, logo_path, background_image_path, player_photo_path)  # ← CAMBIO
+    pdf.cover_position = player_position
+    pdf.cover_filters = filters_data if isinstance(filters_data, dict) else {}
+    selected_matches = pdf.cover_filters.get("selected_matches", []) if isinstance(pdf.cover_filters, dict) else []
+    if isinstance(selected_matches, (list, tuple)):
+        pdf.cover_match_count = len(selected_matches)
     
     # 1. Portada (ahora estilo MAX ALLEYNE)
     pdf.cover_page()
@@ -1021,6 +1116,13 @@ def generate_individual_development_report(
             self.COLOR_YELLOW = (252, 236, 3)
             self.COLOR_GRAY = (136, 136, 136)
             self.COLOR_BLACK = (0, 0, 0)
+            self.COLOR_WHITE = (255, 255, 255)
+            self.COLOR_RED = (237, 28, 36)
+            self.COLOR_CHARCOAL = (30, 34, 40)
+            self.COLOR_LIGHT_BG = (244, 246, 248)
+            self.COLOR_MUTED_TEXT = (94, 102, 111)
+            self.COLOR_CARD_BORDER = (190, 196, 204)
+            self.COLOR_CARD_SHADOW = (210, 214, 220)
             
         def header(self):
             if self.page_no() > 1:
@@ -1045,45 +1147,87 @@ def generate_individual_development_report(
                 self.set_font('Arial', 'I', 10)
                 page_text = f'Page {self.page_no() - 1}'
                 self.cell(0, 10, page_text, 0, 0, 'R')
+
+        def _draw_cover_player_photo_card(self, x=63, y=110, card_w=84, card_h=114):
+            self.set_fill_color(*self.COLOR_CARD_SHADOW)
+            self.rect(x + 1.6, y + 1.6, card_w, card_h, 'F')
+            self.set_fill_color(*self.COLOR_WHITE)
+            self.rect(x, y, card_w, card_h, 'F')
+            self.set_draw_color(*self.COLOR_CARD_BORDER)
+            self.set_line_width(0.5)
+            self.rect(x, y, card_w, card_h, 'D')
+
+            photo_size = 68
+            photo_x = x + (card_w - photo_size) / 2
+            photo_y = y + 8
+            has_photo = self.player_photo_path and os.path.exists(self.player_photo_path)
+
+            if has_photo:
+                try:
+                    self.image(self.player_photo_path, x=photo_x, y=photo_y, w=photo_size, h=photo_size)
+                except Exception as e:
+                    print(f"Error loading player cover photo: {e}")
+                    has_photo = False
+
+            if not has_photo:
+                self.set_fill_color(235, 238, 242)
+                self.rect(photo_x, photo_y, photo_size, photo_size, 'F')
+                self.set_draw_color(200, 205, 212)
+                self.rect(photo_x, photo_y, photo_size, photo_size, 'D')
+                self.set_xy(photo_x, photo_y + (photo_size / 2) - 3)
+                self.set_font('Arial', 'B', 9)
+                self.set_text_color(*self.COLOR_MUTED_TEXT)
+                self.cell(photo_size, 6, 'NO PHOTO', 0, 0, 'C')
+
+            self.set_xy(x, y + card_h - 25)
+            self.set_font('Arial', 'B', 10)
+            self.set_text_color(*self.COLOR_BLACK)
+            self.cell(card_w, 6, 'PLAYER PROFILE', 0, 1, 'C')
+            self.set_x(x)
+            self.set_font('Arial', '', 8)
+            self.set_text_color(*self.COLOR_MUTED_TEXT)
+            self.cell(card_w, 5, 'Official cover photo', 0, 0, 'C')
         
         def cover_page(self):
             self.add_page()
-            self.ln(60)
-            
-            self.set_font('Arial', 'B', 36)
-            self.set_text_color(*self.COLOR_BLACK)
-            self.cell(0, 20, self.player_name, 0, 1, 'C')
-            
-            self.set_font('Arial', '', 24)
-            self.set_text_color(*self.COLOR_GRAY)
-            self.cell(0, 15, 'Individual Development', 0, 1, 'C')
-            
+
+            # Base background + top brand block
+            self.set_fill_color(*self.COLOR_LIGHT_BG)
+            self.rect(0, 0, 210, 297, 'F')
+            self.set_fill_color(*self.COLOR_CHARCOAL)
+            self.rect(0, 0, 210, 84, 'F')
+            self.set_fill_color(*self.COLOR_RED)
+            self.rect(0, 84, 210, 2, 'F')
+
+            # Logo on dark block
             try:
                 if os.path.exists(self.logo_path):
-                    logo_width = 80
-                    logo_x = (210 - logo_width) / 2
-                    logo_y = 120
-                    self.image(self.logo_path, x=logo_x, y=logo_y, w=logo_width)
+                    self.image(self.logo_path, x=14, y=14, w=30)
             except:
                 pass
 
-            if self.player_photo_path and os.path.exists(self.player_photo_path):
-                try:
-                    size = 48
-                    x = (210 - size) / 2
-                    y = 142
-                    self.set_draw_color(252, 236, 3)
-                    self.set_line_width(1.0)
-                    self.rect(x - 1.5, y - 1.5, size + 3, size + 3, 'D')
-                    self.image(self.player_photo_path, x=x, y=y, w=size, h=size)
-                except Exception as e:
-                    print(f"Error loading player cover photo: {e}")
-            
-            self.set_y(-30)
-            self.set_font('Arial', 'I', 10)
-            self.set_text_color(*self.COLOR_GRAY)
+            # Titles
+            self.set_xy(52, 20)
+            self.set_font('Arial', '', 11)
+            self.set_text_color(188, 194, 201)
+            self.cell(130, 6, 'Watford FC Academy', 0, 1, 'L')
+            self.set_x(52)
+            self.set_font('Arial', 'B', 24)
+            self.set_text_color(*self.COLOR_WHITE)
+            self.cell(145, 11, self.player_name.upper(), 0, 1, 'L')
+            self.set_x(52)
+            self.set_font('Arial', '', 14)
+            self.set_text_color(206, 211, 218)
+            self.cell(145, 8, 'Individual Development Report', 0, 0, 'L')
+
+            # Cover photo card
+            self._draw_cover_player_photo_card()
+
             generated_date = datetime.now().strftime("%B %d, %Y")
-            self.cell(0, 10, f'Generated: {generated_date}', 0, 0, 'C')
+            self.set_y(-26)
+            self.set_font('Arial', '', 10)
+            self.set_text_color(*self.COLOR_MUTED_TEXT)
+            self.cell(0, 8, f'Generated {generated_date}', 0, 0, 'C')
         
         def filters_page(self, fecha_inicio, fecha_fin):
             self.add_page()
@@ -1326,7 +1470,7 @@ def generate_individual_development_report_landscape(
     player_name: str,
     fecha_inicio: str,
     fecha_fin: str,
-    df_actividades: pd.DataFrame,
+    df_activities: pd.DataFrame,
     df_summary: pd.DataFrame = None,
     df_ratings: pd.DataFrame = None,  # ← NUEVO: DataFrame con ratings de WhoScored
     fig_comparison: any = None,
@@ -1334,6 +1478,7 @@ def generate_individual_development_report_landscape(
     logo_path: str = "img/watford_logo.png",
     background_image_path: str = "img/Watford_portada.jpg",
     player_photo_path: str | None = None,
+    cover_only: bool = False,
 ):
     """
     V3: Ratings de WhoScored + Nombre centrado + Timeline sin deformar
@@ -1361,6 +1506,11 @@ def generate_individual_development_report_landscape(
             self.COLOR_GRAY_TEXT = (136, 136, 136)
             self.COLOR_BLACK = (0, 0, 0)
             self.COLOR_WHITE = (255, 255, 255)
+            self.COLOR_CHARCOAL = (30, 34, 40)
+            self.COLOR_LIGHT_BG = (244, 246, 248)
+            self.COLOR_MUTED_TEXT = (94, 102, 111)
+            self.COLOR_CARD_BORDER = (190, 196, 204)
+            self.COLOR_CARD_SHADOW = (210, 214, 220)
         
         def header(self):
             """Header con nombre CENTRADO VERTICALMENTE"""
@@ -1392,56 +1542,101 @@ def generate_individual_development_report_landscape(
                 self.cell(0, 10, 'Individual Development Report', 0, 0, 'C')
                 page_text = f'Page {self.page_no() - 1}'
                 self.cell(0, 10, page_text, 0, 0, 'R')
+
+        def _draw_cover_player_photo_card(self, x=188, y=48, card_w=92, card_h=122):
+            self.set_fill_color(*self.COLOR_CARD_SHADOW)
+            self.rect(x + 1.8, y + 1.8, card_w, card_h, 'F')
+            self.set_fill_color(*self.COLOR_WHITE)
+            self.rect(x, y, card_w, card_h, 'F')
+            self.set_draw_color(*self.COLOR_CARD_BORDER)
+            self.set_line_width(0.5)
+            self.rect(x, y, card_w, card_h, 'D')
+
+            photo_size = 78
+            photo_x = x + (card_w - photo_size) / 2
+            photo_y = y + 8
+            has_photo = self.player_photo_path and os.path.exists(self.player_photo_path)
+
+            if has_photo:
+                try:
+                    self.image(self.player_photo_path, x=photo_x, y=photo_y, w=photo_size, h=photo_size)
+                except Exception as e:
+                    print(f"Error loading player cover photo: {e}")
+                    has_photo = False
+
+            if not has_photo:
+                self.set_fill_color(235, 238, 242)
+                self.rect(photo_x, photo_y, photo_size, photo_size, 'F')
+                self.set_draw_color(200, 205, 212)
+                self.rect(photo_x, photo_y, photo_size, photo_size, 'D')
+                self.set_xy(photo_x, photo_y + (photo_size / 2) - 3)
+                self.set_font('Arial', 'B', 9)
+                self.set_text_color(*self.COLOR_MUTED_TEXT)
+                self.cell(photo_size, 6, 'NO PHOTO', 0, 0, 'C')
+
+            self.set_xy(x, y + card_h - 25)
+            self.set_font('Arial', 'B', 10)
+            self.set_text_color(*self.COLOR_BLACK)
+            self.cell(card_w, 6, 'PLAYER PROFILE', 0, 1, 'C')
+            self.set_x(x)
+            self.set_font('Arial', '', 8)
+            self.set_text_color(*self.COLOR_MUTED_TEXT)
+            self.cell(card_w, 5, 'Official cover photo', 0, 0, 'C')
         
         def cover_page_max_alleyne_style(self):
             self.add_page()
-            
-            self.set_fill_color(*self.COLOR_GRAY_BG)
-            self.rect(0, 0, 60, 210, 'F')
-            
+
+            # Base background and left strip
+            self.set_fill_color(*self.COLOR_LIGHT_BG)
+            self.rect(0, 0, 297, 210, 'F')
+            left_strip_w = 78
+            self.set_fill_color(*self.COLOR_CHARCOAL)
+            self.rect(0, 0, left_strip_w, 210, 'F')
             self.set_fill_color(*self.COLOR_RED)
-            self.rect(60, 0, 3, 210, 'F')
-            
+            self.rect(left_strip_w, 0, 2.5, 210, 'F')
+
             try:
                 if os.path.exists(self.logo_path):
-                    self.image(self.logo_path, x=10, y=15, w=40)
+                    self.image(self.logo_path, x=14, y=14, w=48)
             except:
                 pass
-            
-            self.set_xy(5, 90)
-            self.set_font('Arial', 'B', 14)
-            self.set_text_color(*self.COLOR_WHITE)
-            self.multi_cell(50, 8, 'INDIVIDUAL\nDEVELOPMENT', 0, 'C')
-            
-            self.set_xy(5, 180)
-            self.set_font('Arial', '', 12)
-            self.set_text_color(*self.COLOR_WHITE)
-            self.cell(50, 8, 'ALBERTO GARRIDO', 0, 0, 'C')
-            
-            try:
-                if os.path.exists(self.background_image_path):
-                    self.image(self.background_image_path, x=63, y=0, w=234, h=210)
-            except Exception as e:
-                print(f"Error loading background: {e}")
-            
-            self.set_xy(150, 20)
-            self.set_font('Arial', 'B', 32)
-            self.set_text_color(*self.COLOR_WHITE)
-            self.cell(130, 15, self.player_name.upper(), 0, 0, 'R')
 
-            if self.player_photo_path and os.path.exists(self.player_photo_path):
-                try:
-                    size = 72
-                    x = 205
-                    y = 86
-                    self.set_fill_color(*self.COLOR_WHITE)
-                    self.rect(x - 2, y - 2, size + 4, size + 4, 'F')
-                    self.set_draw_color(*self.COLOR_YELLOW)
-                    self.set_line_width(1.2)
-                    self.rect(x - 2, y - 2, size + 4, size + 4, 'D')
-                    self.image(self.player_photo_path, x=x, y=y, w=size, h=size)
-                except Exception as e:
-                    print(f"Error loading player cover photo: {e}")
+            self.set_xy(12, 88)
+            self.set_font('Arial', 'B', 13)
+            self.set_text_color(*self.COLOR_WHITE)
+            self.multi_cell(left_strip_w - 24, 7, 'INDIVIDUAL\nDEVELOPMENT\nREPORT', 0, 'L')
+            self.set_xy(12, 192)
+            self.set_font('Arial', '', 9)
+            self.set_text_color(188, 194, 201)
+            self.cell(left_strip_w - 24, 6, 'Watford FC Analytics', 0, 0, 'L')
+
+            # Title block
+            content_x = left_strip_w + 12
+            self.set_xy(content_x, 24)
+            self.set_font('Arial', '', 11)
+            self.set_text_color(*self.COLOR_MUTED_TEXT)
+            self.cell(96, 6, 'Watford FC Academy', 0, 1, 'L')
+            self.set_x(content_x)
+            self.set_font('Arial', 'B', 31)
+            self.set_text_color(*self.COLOR_CHARCOAL)
+            self.cell(102, 13, self.player_name.upper(), 0, 1, 'L')
+            self.set_x(content_x)
+            self.set_font('Arial', '', 15)
+            self.set_text_color(*self.COLOR_MUTED_TEXT)
+            self.cell(105, 10, 'Individual Development Report', 0, 1, 'L')
+
+            self.set_draw_color(215, 220, 226)
+            self.set_line_width(0.6)
+            self.line(content_x, 74, 178, 74)
+            self.line(content_x, 146, 178, 146)
+
+            generated_date = datetime.now().strftime("%B %d, %Y")
+            self.set_xy(content_x, 186)
+            self.set_font('Arial', '', 10)
+            self.set_text_color(*self.COLOR_MUTED_TEXT)
+            self.cell(120, 6, f'Generated {generated_date}', 0, 0, 'L')
+
+            self._draw_cover_player_photo_card()
         
         def activities_chart_and_table_page(self, df_actividades, fig_comparison_path=None):
             self.add_page()
@@ -1616,6 +1811,7 @@ def generate_individual_development_report_landscape(
     # ========== GENERAR PDF ==========
     pdf = IndividualDevelopmentLandscape(player_name, logo_path, background_image_path, player_photo_path)
     pdf.cover_page_max_alleyne_style()
+    df_actividades = df_activities if isinstance(df_activities, pd.DataFrame) else pd.DataFrame()
     
     temp_files = []
     fig_comparison_path = None
@@ -1776,8 +1972,11 @@ def generate_individual_development_report_landscape(
             except Exception as e:
                 print(f"Error creating rating chart: {e}")
         
-        pdf.activities_chart_and_table_page(df_actividades, fig_comparison_path)
-        pdf.timeline_page(fig_timeline_path, fig_rating_path)
+        if not cover_only:
+            if fig_comparison_path or not df_actividades.empty:
+                pdf.activities_chart_and_table_page(df_actividades, fig_comparison_path)
+            if fig_timeline_path or fig_rating_path:
+                pdf.timeline_page(fig_timeline_path, fig_rating_path)
         
     finally:
         for temp_file in temp_files:

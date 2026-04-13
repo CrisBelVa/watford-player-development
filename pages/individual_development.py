@@ -1242,6 +1242,7 @@ elif page == "Players Profile":
                             logo_path=LOGO_PATH,
                             background_image_path=BACKGROUND_COVER_PATH if os.path.exists(BACKGROUND_COVER_PATH) else None,
                             player_photo_path=selected_cover_photo_path if (selected_cover_photo_path and os.path.exists(selected_cover_photo_path)) else None,
+                            cover_only=True,
                         )
 
                     if not pdf_bytes:
