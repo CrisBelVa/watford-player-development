@@ -27,9 +27,15 @@ st.set_page_config(
 # Master password for Player login (can be overridden via env var)
 MASTER_PASSWORD = os.environ.get("PLAYER_MASTER_PASSWORD", "admin123")
 
-@st.cache_resource(show_spinner=False)
 def get_sheets_client() -> GoogleSheetsClient:
-    return GoogleSheetsClient()
+    cache_key = "_login_sheets_client"
+    cached_client = st.session_state.get(cache_key)
+    if isinstance(cached_client, GoogleSheetsClient):
+        return cached_client
+
+    client = GoogleSheetsClient()
+    st.session_state[cache_key] = client
+    return client
 
 # --- Load Players from Google Sheets (fallback local CSV/XLSX) ---
 @st.cache_data(ttl=600)

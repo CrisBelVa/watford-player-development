@@ -7,16 +7,27 @@ import plotly.io as pio
 import numpy as np  # ← AÑADIR ESTA LÍNEA
 import plotly.graph_objects as go  # ← AÑADIR ESTA LÍNEA
 
+
+def _write_plotly_png(fig, output_path: str, width: int, height: int, scale: float = 1.0) -> None:
+    """Fast and compatible Plotly-to-PNG export helper."""
+    try:
+        pio.write_image(fig, output_path, width=int(width), height=int(height), scale=scale, engine="kaleido")
+    except TypeError:
+        # Older kaleido/plotly stacks may not accept the engine kwarg.
+        pio.write_image(fig, output_path, width=int(width), height=int(height), scale=scale)
+
+
 class WatfordPlayerReport(FPDF):
     """
     Generador de reportes PDF para jugadores de Watford FC
     """
     
-    def __init__(self, player_name, logo_path, background_image_path=None):  # ← NUEVO PARÁMETRO
+    def __init__(self, player_name, logo_path, background_image_path=None, player_photo_path=None):  # ← NUEVO PARÁMETRO
         super().__init__(orientation='L', unit='mm', format='A4')  # Landscape
         self.player_name = player_name
         self.logo_path = logo_path
         self.background_image_path = background_image_path  # ← NUEVO
+        self.player_photo_path = player_photo_path
         self.set_auto_page_break(auto=True, margin=15)
         
         # Colores Watford
@@ -66,6 +77,21 @@ class WatfordPlayerReport(FPDF):
             page_text = f'Page {self.page_no() - 1}'
             self.cell(0, 10, page_text, 0, 0, 'R')
 
+    def _draw_cover_player_photo(self, x=205, y=86, size=72):
+        if not self.player_photo_path:
+            return
+        if not os.path.exists(self.player_photo_path):
+            return
+        try:
+            self.set_fill_color(*self.COLOR_WHITE)
+            self.rect(x - 2, y - 2, size + 4, size + 4, 'F')
+            self.set_draw_color(*self.COLOR_YELLOW)
+            self.set_line_width(1.2)
+            self.rect(x - 2, y - 2, size + 4, size + 4, 'D')
+            self.image(self.player_photo_path, x=x, y=y, w=size, h=size)
+        except Exception as e:
+            print(f"Error loading player cover photo: {e}")
+
     def cover_page(self):
         """
         Portada estilo MAX ALLEYNE (Individual Development)
@@ -111,6 +137,9 @@ class WatfordPlayerReport(FPDF):
                 self.image(self.background_image_path, x=63, y=0, h=210)  # ← SOLO altura, NO ancho
         except Exception as e:
             print(f"Error loading background: {e}")
+
+        # Optional player portrait on cover.
+        self._draw_cover_player_photo()
         
         # Nombre del jugador (sobre la imagen, arriba a la derecha)
         self.set_xy(150, 20)
@@ -578,7 +607,7 @@ class WatfordPlayerReport(FPDF):
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                     tmp_path = tmp.name
 
-                pio.write_image(item['fig'], tmp_path, width=1400, height=500, scale=2)
+                _write_plotly_png(item['fig'], tmp_path, width=1100, height=380, scale=1.0)
 
                 self.set_font('Arial', 'B', 10)
                 self.set_text_color(*self.COLOR_WHITE)
@@ -787,7 +816,7 @@ class WatfordPlayerReport(FPDF):
                         tmp_path = tmp.name
                     
                     # Convertir Plotly a imagen
-                    pio.write_image(item['fig'], tmp_path, width=1200, height=400, scale=2)
+                    _write_plotly_png(item['fig'], tmp_path, width=1000, height=320, scale=1.0)
                     
                     # Título del gráfico
                     self.set_font('Arial', 'B', 10)
@@ -834,13 +863,14 @@ def generate_player_report(
     comparison_data=None,
     comparison_kpi_table=None,
     comparison_charts=None,
-    background_image_path=None  # ← NUEVO PARÁMETRO
+    background_image_path=None,  # ← NUEVO PARÁMETRO
+    player_photo_path=None,
 ):
     """
     Genera el reporte PDF completo
     """
     # Crear PDF CON BACKGROUND
-    pdf = WatfordPlayerReport(player_name, logo_path, background_image_path)  # ← CAMBIO
+    pdf = WatfordPlayerReport(player_name, logo_path, background_image_path, player_photo_path)  # ← CAMBIO
     
     # 1. Portada (ahora estilo MAX ALLEYNE)
     pdf.cover_page()
@@ -957,7 +987,8 @@ def generate_individual_development_report(
     fecha_fin: str,
     df_actividades: pd.DataFrame,
     df_summary: pd.DataFrame = None,
-    logo_path: str = "img/watford_logo.png"
+    logo_path: str = "img/watford_logo.png",
+    player_photo_path: str | None = None,
 ):
     """
     Genera PDF para Individual Development con tablas paginadas.
@@ -979,10 +1010,11 @@ def generate_individual_development_report(
     import os
     
     class IndividualDevelopmentReport(FPDF):
-        def __init__(self, player_name, logo_path):
+        def __init__(self, player_name, logo_path, player_photo_path=None):
             super().__init__(orientation='P', unit='mm', format='A4')  # Portrait
             self.player_name = player_name
             self.logo_path = logo_path
+            self.player_photo_path = player_photo_path
             self.set_auto_page_break(auto=True, margin=15)
             
             # Colores Watford
@@ -1034,6 +1066,18 @@ def generate_individual_development_report(
                     self.image(self.logo_path, x=logo_x, y=logo_y, w=logo_width)
             except:
                 pass
+
+            if self.player_photo_path and os.path.exists(self.player_photo_path):
+                try:
+                    size = 48
+                    x = (210 - size) / 2
+                    y = 142
+                    self.set_draw_color(252, 236, 3)
+                    self.set_line_width(1.0)
+                    self.rect(x - 1.5, y - 1.5, size + 3, size + 3, 'D')
+                    self.image(self.player_photo_path, x=x, y=y, w=size, h=size)
+                except Exception as e:
+                    print(f"Error loading player cover photo: {e}")
             
             self.set_y(-30)
             self.set_font('Arial', 'I', 10)
@@ -1257,7 +1301,7 @@ def generate_individual_development_report(
                 self.set_xy(x_start, y_start + row_height)
     
     # ========== GENERAR PDF ==========
-    pdf = IndividualDevelopmentReport(player_name, logo_path)
+    pdf = IndividualDevelopmentReport(player_name, logo_path, player_photo_path)
     
     # Portada
     pdf.cover_page()
@@ -1288,7 +1332,8 @@ def generate_individual_development_report_landscape(
     fig_comparison: any = None,
     fig_timeline: any = None,
     logo_path: str = "img/watford_logo.png",
-    background_image_path: str = "img/Watford_portada.jpg"
+    background_image_path: str = "img/Watford_portada.jpg",
+    player_photo_path: str | None = None,
 ):
     """
     V3: Ratings de WhoScored + Nombre centrado + Timeline sin deformar
@@ -1302,11 +1347,12 @@ def generate_individual_development_report_landscape(
     import plotly.graph_objects as go
     
     class IndividualDevelopmentLandscape(FPDF):
-        def __init__(self, player_name, logo_path, background_image_path):
+        def __init__(self, player_name, logo_path, background_image_path, player_photo_path=None):
             super().__init__(orientation='L', unit='mm', format='A4')
             self.player_name = player_name
             self.logo_path = logo_path
             self.background_image_path = background_image_path
+            self.player_photo_path = player_photo_path
             self.set_auto_page_break(auto=False)
             
             self.COLOR_YELLOW = (252, 236, 3)
@@ -1382,6 +1428,20 @@ def generate_individual_development_report_landscape(
             self.set_font('Arial', 'B', 32)
             self.set_text_color(*self.COLOR_WHITE)
             self.cell(130, 15, self.player_name.upper(), 0, 0, 'R')
+
+            if self.player_photo_path and os.path.exists(self.player_photo_path):
+                try:
+                    size = 72
+                    x = 205
+                    y = 86
+                    self.set_fill_color(*self.COLOR_WHITE)
+                    self.rect(x - 2, y - 2, size + 4, size + 4, 'F')
+                    self.set_draw_color(*self.COLOR_YELLOW)
+                    self.set_line_width(1.2)
+                    self.rect(x - 2, y - 2, size + 4, size + 4, 'D')
+                    self.image(self.player_photo_path, x=x, y=y, w=size, h=size)
+                except Exception as e:
+                    print(f"Error loading player cover photo: {e}")
         
         def activities_chart_and_table_page(self, df_actividades, fig_comparison_path=None):
             self.add_page()
@@ -1554,7 +1614,7 @@ def generate_individual_development_report_landscape(
                     print(f"Error inserting rating: {e}")
     
     # ========== GENERAR PDF ==========
-    pdf = IndividualDevelopmentLandscape(player_name, logo_path, background_image_path)
+    pdf = IndividualDevelopmentLandscape(player_name, logo_path, background_image_path, player_photo_path)
     pdf.cover_page_max_alleyne_style()
     
     temp_files = []
@@ -1568,7 +1628,7 @@ def generate_individual_development_report_landscape(
             temp_comparison_path = temp_comparison.name
             temp_comparison.close()
             try:
-                pio.write_image(fig_comparison, temp_comparison_path, width=1000, height=400)
+                _write_plotly_png(fig_comparison, temp_comparison_path, width=900, height=320, scale=1.0)
                 fig_comparison_path = temp_comparison_path
                 temp_files.append(temp_comparison_path)
             except Exception as e:
@@ -1586,7 +1646,7 @@ def generate_individual_development_report_landscape(
                 # ===== REDUCIR ALTURA PARA EVITAR DEFORMACIÓN =====
                 # pio.write_image(fig_timeline, temp_timeline.name, width=1200, height=350)  # ← AJUSTADO
                 # ✅ MAYOR RESOLUCIÓN PARA MEJOR CALIDAD
-                pio.write_image(fig_timeline, temp_timeline_path, width=1600, height=500, scale=2)
+                _write_plotly_png(fig_timeline, temp_timeline_path, width=1200, height=380, scale=1.0)
                 fig_timeline_path = temp_timeline_path
                 temp_files.append(temp_timeline_path)
             except Exception as e:
@@ -1710,7 +1770,7 @@ def generate_individual_development_report_landscape(
                         )
                     )
                     temp_rating = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                    pio.write_image(fig_rating, temp_rating.name, width=1200, height=350)
+                    _write_plotly_png(fig_rating, temp_rating.name, width=1000, height=300, scale=1.0)
                     fig_rating_path = temp_rating.name
                     temp_files.append(temp_rating.name)
             except Exception as e:

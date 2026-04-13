@@ -39,9 +39,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-@st.cache_resource(show_spinner=False)
 def get_sheets_client() -> GoogleSheetsClient:
-    return GoogleSheetsClient()
+    cache_key = "_player_dashboard_sheets_client"
+    cached_client = st.session_state.get(cache_key)
+    if isinstance(cached_client, GoogleSheetsClient):
+        return cached_client
+
+    client = GoogleSheetsClient()
+    st.session_state[cache_key] = client
+    return client
 
 # Verificar autenticación
 if "logged_in" not in st.session_state or not st.session_state.logged_in:

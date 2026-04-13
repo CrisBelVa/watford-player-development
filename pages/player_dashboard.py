@@ -19,6 +19,7 @@ from pandas.io.formats.style import Styler
 import streamlit.components.v1 as components  # ✅ needed for working HTML injection
 from player_ids import normalize_whoscored_player_id, whoscored_player_url
 from utils.sheets_client import GoogleSheetsClient
+from utils.pdf_cover_photos import list_cover_photos, save_cover_photo
 
 # Optional: helper to navigate between pages
 try:
@@ -40,15 +41,88 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-@st.cache_resource(show_spinner=False)
 def get_sheets_client() -> GoogleSheetsClient:
-    return GoogleSheetsClient()
+    cache_key = "_pages_player_dashboard_sheets_client"
+    cached_client = st.session_state.get(cache_key)
+    if isinstance(cached_client, GoogleSheetsClient):
+        return cached_client
+
+    client = GoogleSheetsClient()
+    st.session_state[cache_key] = client
+    return client
 
 
 def _safe_pdf_filename(name: str) -> str:
     sanitized = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(name or "").strip())
     sanitized = sanitized.strip("_")
     return sanitized or "player_report"
+
+
+if hasattr(st, "dialog"):
+    @st.dialog("PDF Cover Photo")
+    def _pdf_cover_photo_dialog(player_key: str, player_label: str, session_key: str, key_prefix: str):
+        st.caption("Upload a player photo and keep it in history for future PDF reports.")
+        uploaded_photo = st.file_uploader(
+            "Upload player photo",
+            type=["jpg", "jpeg", "png", "webp"],
+            key=f"{key_prefix}_upload",
+        )
+        if st.button("Save uploaded photo", key=f"{key_prefix}_save_upload"):
+            if uploaded_photo is None:
+                st.warning("Please upload an image first.")
+            else:
+                try:
+                    saved_path = save_cover_photo(
+                        uploaded_file=uploaded_photo,
+                        base_dir=BASE_DIR,
+                        player_key=player_key,
+                    )
+                    st.session_state[session_key] = saved_path
+                    st.success("Photo saved and set as active cover.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not save photo: {exc}")
+
+        history = list_cover_photos(base_dir=BASE_DIR, player_key=player_key)
+        if not history:
+            st.info(f"No saved cover photos yet for {player_label}.")
+            if st.button("Use no photo", key=f"{key_prefix}_none_only"):
+                st.session_state[session_key] = None
+                st.success("PDF cover will use no player photo.")
+            return
+
+        options = [None] + [item["path"] for item in history]
+        labels = {None: "No photo"}
+        for item in history:
+            labels[item["path"]] = item["label"]
+
+        current_value = st.session_state.get(session_key)
+        if current_value not in options:
+            current_value = history[0]["path"]
+            st.session_state[session_key] = current_value
+
+        selected_value = st.selectbox(
+            "Photo history",
+            options=options,
+            index=options.index(current_value) if current_value in options else 0,
+            format_func=lambda value: labels.get(value, "No photo"),
+            key=f"{key_prefix}_history_select",
+        )
+        if selected_value and os.path.exists(selected_value):
+            st.image(selected_value, width=220, caption="Cover preview")
+
+        col_apply, col_clear = st.columns(2)
+        with col_apply:
+            if st.button("Use selected photo", key=f"{key_prefix}_apply"):
+                st.session_state[session_key] = selected_value
+                st.success("Active cover photo updated.")
+        with col_clear:
+            if st.button("Use no photo", key=f"{key_prefix}_clear"):
+                st.session_state[session_key] = None
+                st.success("PDF cover will use no player photo.")
+else:
+    def _pdf_cover_photo_dialog(*args, **kwargs):
+        st.warning("This Streamlit version does not support popup dialogs.")
 
 # === AUTHENTICATION CHECK ===
 if "logged_in" not in st.session_state or not st.session_state.logged_in:
@@ -1491,12 +1565,38 @@ if section == "Overview Stats":
         season_value = st.session_state.get("selected_season") or "All seasons"
         selected_match_map = dict(zip(match_options["matchId"], match_options["match_label"]))
         selected_match_labels = [selected_match_map.get(mid, str(mid)) for mid in current_selected]
+        cover_player_key = f"{player_id}_{player_name}"
+        cover_session_key = f"player_report_cover_photo_path_{player_id}"
+
+        if cover_session_key not in st.session_state:
+            history = list_cover_photos(base_dir=BASE_DIR, player_key=cover_player_key)
+            st.session_state[cover_session_key] = history[0]["path"] if history else None
+
+        if st.button("Manage player cover photo", key="manage_player_report_cover_photo"):
+            _pdf_cover_photo_dialog(
+                player_key=cover_player_key,
+                player_label=player_name,
+                session_key=cover_session_key,
+                key_prefix=f"player_pdf_cover_{player_id}",
+            )
+
+        selected_cover_photo_path = st.session_state.get(cover_session_key)
+        if selected_cover_photo_path and os.path.exists(selected_cover_photo_path):
+            st.caption("Active player cover photo")
+            st.image(selected_cover_photo_path, width=140)
+        else:
+            st.caption("No player cover photo selected.")
+
+        cover_photo_signature = "none"
+        if selected_cover_photo_path and os.path.exists(selected_cover_photo_path):
+            cover_photo_signature = f"{selected_cover_photo_path}:{int(os.path.getmtime(selected_cover_photo_path))}"
 
         report_signature = (
             f"{player_id}|{player_name}|{season_value}|"
             f"{delta_start_date}|{delta_end_date}|{reference_start_date}|{reference_end_date}|"
             f"{comparison_mode_label}|{comparison_value_label}|"
-            f"{','.join(str(mid) for mid in current_selected)}"
+            f"{','.join(str(mid) for mid in current_selected)}|"
+            f"{cover_photo_signature}"
         )
         if st.session_state.get("player_report_pdf_signature") != report_signature:
             st.session_state["player_report_pdf_signature"] = report_signature
@@ -1662,6 +1762,7 @@ if section == "Overview Stats":
                                 comparison_kpi_table=None,
                                 comparison_charts=None,
                                 background_image_path=BACKGROUND_COVER_PATH if os.path.exists(BACKGROUND_COVER_PATH) else None,
+                                player_photo_path=selected_cover_photo_path if (selected_cover_photo_path and os.path.exists(selected_cover_photo_path)) else None,
                             )
 
                         if not pdf_bytes:
@@ -2019,15 +2120,15 @@ elif section == "Player Comparison":
     # ---------- Real Position codes ----------
     reverse_position_map = {
         "Goalkeeper": ["GK"],
-        "Center Back": ["DC"],
-        "Left Back": ["DL", "DML"],
-        "Right Back": ["DR", "DMR"],
-        "Defensive Midfielder": ["DMC"],
-        "Midfielder": ["MC", "ML", "MR"],
-        "Attacking Midfielder": ["AMC"],
-        "Left Winger": ["AML", "FWL"],
-        "Right Winger": ["AMR", "FWR"],
-        "Striker": ["FW"]
+        "Center Back": ["DC", "CB"],
+        "Left Back": ["DL", "DML", "LB", "LWB"],
+        "Right Back": ["DR", "DMR", "RB", "RWB"],
+        "Defensive Midfielder": ["DMC", "DM"],
+        "Midfielder": ["MC", "ML", "MR", "CM", "LM", "RM"],
+        "Attacking Midfielder": ["AMC", "AM"],
+        "Left Winger": ["AML", "FWL", "LW"],
+        "Right Winger": ["AMR", "FWR", "RW"],
+        "Striker": ["FW", "ST", "CF"]
     }
 
     position_codes = reverse_position_map.get(player_position, [])
@@ -2179,10 +2280,32 @@ elif section == "Player Comparison":
     if players_full["startDate"].isna().all():
         st.warning("⚠️ No startDate merged from match_data — check matchId alignment or competition filter.")
 
+    # Apply selected teams and selected position (same role as logged-in player).
+    selected_team_ids_set = set(pd.to_numeric(pd.Series(selected_team_ids), errors="coerce").dropna().astype("Int64").tolist())
+    players_scope_all = players_full[players_full["teamId"].isin(selected_team_ids_set)].copy()
+
+    position_codes_set = {str(code).strip().upper() for code in position_codes}
+    players_scope_all["position"] = players_scope_all["position"].astype("string").str.strip().str.upper()
+    players_full = players_scope_all[players_scope_all["position"].isin(position_codes_set)].copy()
+
+    if players_full.empty:
+        st.warning("No players found for the selected teams and position.")
+        st.stop()
+
+    # Team-level denominator for minutes % (within current season/date/team filters).
+    team_match_counts = (
+        players_scope_all[["teamId", "matchId"]]
+        .dropna(subset=["teamId", "matchId"])
+        .drop_duplicates()
+        .groupby("teamId", as_index=False)["matchId"]
+        .nunique()
+        .rename(columns={"matchId": "team_matches_in_scope"})
+    )
+
     # ---------------------------
     # 5) DEDUPE TO ONE ROW PER PLAYER-MATCH
     # ---------------------------
-    players_full.groupby(["playerId","playerName","teamId","teamName","matchId","startDate"], as_index=False).agg(
+    players_full = players_full.groupby(["playerId","playerName","teamId","teamName","matchId","startDate"], as_index=False).agg(
             age=("age","first"),
             shirtNo=("shirtNo","first"),
             height=("height","first"),
@@ -2197,24 +2320,93 @@ elif section == "Player Comparison":
     # 6) PLAYER PICKER
     # ---------------------------
     player_index = (
-        players_full.groupby(["playerId","playerName","teamName"], as_index=False)
+        players_full.groupby(["playerId","playerName","teamId","teamName"], as_index=False)
         .agg(minutes=("minutesPlayed","sum"))
         .sort_values("minutes", ascending=False)
     )
 
-    options_ids = player_index["playerId"].astype(str).tolist()
+    player_index = player_index.merge(team_match_counts, on="teamId", how="left")
+    player_index["team_matches_in_scope"] = pd.to_numeric(
+        player_index["team_matches_in_scope"], errors="coerce"
+    ).fillna(0)
+    player_index["minutes_pct_total"] = np.where(
+        player_index["team_matches_in_scope"] > 0,
+        (player_index["minutes"] / (player_index["team_matches_in_scope"] * 90.0)) * 100.0,
+        np.nan,
+    )
+    player_index["minutes_pct_total"] = (
+        pd.to_numeric(player_index["minutes_pct_total"], errors="coerce")
+        .fillna(0.0)
+        .clip(lower=0.0, upper=100.0)
+        .round(1)
+    )
+
     logged_player_id = str(player_id)
-    default_ids = player_index.head(5)["playerId"].astype(str).tolist()
 
-    if (logged_player_id in options_ids) and (logged_player_id not in default_ids):
-        default_ids = ([logged_player_id] + [pid for pid in default_ids if pid != logged_player_id])[:5]
+    with st.expander("Player Selector", expanded=True):
+        max_players_to_show = st.number_input(
+            "Max players to show",
+            min_value=2,
+            max_value=60,
+            value=20,
+            step=1,
+            key="comparison_max_players_to_show",
+            help="Limits the player list after applying team, position and minutes filters.",
+        )
+        min_minutes_pct = st.number_input(
+            "Minimum minutes played (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=20.0,
+            step=1.0,
+            key="comparison_min_minutes_pct",
+            help="Exclude players with low participation in the selected date range.",
+        )
+        use_per90_for_non_pct = st.toggle(
+            "Use per 90 for non-% KPIs",
+            value=True,
+            key="comparison_use_per90_non_pct",
+            help="When enabled, all non-percentage KPIs in comparison are normalized per 90 minutes.",
+        )
 
-    label_map = {
-        str(r.playerId): (f"{r.playerName} ({r.teamName})" if pd.notna(r.teamName) and r.teamName != "" else f"{r.playerName}")
-        for _, r in player_index.iterrows()
-    }
+        eligible_player_index = player_index[
+            (player_index["minutes_pct_total"] >= float(min_minutes_pct))
+            | (player_index["playerId"].astype(str) == logged_player_id)
+        ].copy()
+        eligible_player_index = eligible_player_index.sort_values(
+            by=["minutes_pct_total", "minutes"],
+            ascending=[False, False],
+        )
 
-    with st.expander("Filter Players by Position", expanded=False):
+        if eligible_player_index.empty:
+            st.warning("No players match the selected minimum minutes percentage.")
+            st.stop()
+
+        limited_player_index = eligible_player_index.head(int(max_players_to_show)).copy()
+        if (logged_player_id in eligible_player_index["playerId"].astype(str).values) and (
+            logged_player_id not in limited_player_index["playerId"].astype(str).values
+        ):
+            logged_row = eligible_player_index[eligible_player_index["playerId"].astype(str) == logged_player_id].head(1)
+            limited_player_index = pd.concat(
+                [logged_row, limited_player_index.head(max(0, int(max_players_to_show) - 1))],
+                ignore_index=True,
+            ).drop_duplicates(subset=["playerId"])
+
+        options_ids = limited_player_index["playerId"].astype(str).tolist()
+        default_ids = limited_player_index.head(min(5, int(max_players_to_show)))["playerId"].astype(str).tolist()
+
+        if (logged_player_id in options_ids) and (logged_player_id not in default_ids):
+            default_ids = ([logged_player_id] + [pid for pid in default_ids if pid != logged_player_id])[:5]
+
+        label_map = {
+            str(r.playerId): (
+                f"{r.playerName} ({r.teamName}) - {float(r.minutes_pct_total):.1f}% min"
+                if pd.notna(r.teamName) and r.teamName != ""
+                else f"{r.playerName} - {float(r.minutes_pct_total):.1f}% min"
+            )
+            for _, r in limited_player_index.iterrows()
+        }
+
         selected_player_ids = st.multiselect(
             "Select players to compare",
             options=options_ids,
@@ -2243,6 +2435,22 @@ elif section == "Player Comparison":
         )
     )
 
+    summary_comparison_df = summary_comparison_df.merge(team_match_counts, on="teamId", how="left")
+    summary_comparison_df["team_matches_in_scope"] = pd.to_numeric(
+        summary_comparison_df["team_matches_in_scope"], errors="coerce"
+    ).fillna(0)
+    summary_comparison_df["minutes_pct_total"] = np.where(
+        summary_comparison_df["team_matches_in_scope"] > 0,
+        (summary_comparison_df["total_minutes"] / (summary_comparison_df["team_matches_in_scope"] * 90.0)) * 100.0,
+        np.nan,
+    )
+    summary_comparison_df["minutes_pct_total"] = (
+        pd.to_numeric(summary_comparison_df["minutes_pct_total"], errors="coerce")
+        .fillna(0.0)
+        .clip(lower=0.0, upper=100.0)
+        .round(1)
+    )
+
     summary_display = summary_comparison_df.rename(columns={
         "playerName":"Player",
         "teamName":"Team",
@@ -2252,12 +2460,26 @@ elif section == "Player Comparison":
         "weight":"Weight",
         "matches_played":"Games Played",
         "games_as_starter":"Games as Starter",
-        "total_minutes":"Minutes Played"
+        "total_minutes":"Minutes Played",
+        "minutes_pct_total":"% Total Minutes"
     }).sort_values(by="Games Played", ascending=False)
 
-    st.dataframe(
-        summary_display[["Player","Team","Age","Shirt No","Height","Weight","Games Played","Games as Starter","Minutes Played"]],
-        use_container_width=True
+    summary_table_columns = [
+        "Player",
+        "Team",
+        "Age",
+        "Shirt No",
+        "Height",
+        "Weight",
+        "Games Played",
+        "Games as Starter",
+        "Minutes Played",
+        "% Total Minutes",
+    ]
+    player_list_table_placeholder = st.empty()
+    player_list_table_placeholder.dataframe(
+        summary_display[summary_table_columns],
+        use_container_width=True,
     )
 
 
@@ -2308,6 +2530,8 @@ elif section == "Player Comparison":
     # ---- Combine + enrich labels
     all_metrics_df = pd.concat([logged_player_metrics, comparison_metrics], ignore_index=True)
     all_metrics_df["playerId"] = all_metrics_df["playerId"].astype(str)
+    if "matchId" in all_metrics_df.columns:
+        all_metrics_df["matchId"] = all_metrics_df["matchId"].astype(str)
 
     # Build a name/team lookup (prefer summary_comparison_df; else fallback)
     if {"playerId","playerName","teamName"}.issubset(summary_comparison_df.columns):
@@ -2335,6 +2559,35 @@ elif section == "Player Comparison":
 
     all_metrics_df = all_metrics_df.merge(name_lookup, on="playerId", how="left")
 
+    # Attach minutesPlayed per (playerId, matchId) so per-90 calculations are reliable.
+    minutes_sources = []
+    if {"playerId", "matchId", "minutesPlayed"}.issubset(filtered_players.columns):
+        minutes_sources.append(filtered_players[["playerId", "matchId", "minutesPlayed"]].copy())
+    if {"playerId", "matchId", "minutesPlayed"}.issubset(filtered_logged_player_info.columns):
+        minutes_sources.append(filtered_logged_player_info[["playerId", "matchId", "minutesPlayed"]].copy())
+
+    if minutes_sources:
+        minutes_lookup = pd.concat(minutes_sources, ignore_index=True)
+        minutes_lookup["playerId"] = minutes_lookup["playerId"].astype(str)
+        minutes_lookup["matchId"] = minutes_lookup["matchId"].astype(str)
+        minutes_lookup["minutesPlayed"] = pd.to_numeric(minutes_lookup["minutesPlayed"], errors="coerce").fillna(0.0)
+        minutes_lookup = (
+            minutes_lookup.groupby(["playerId", "matchId"], as_index=False)["minutesPlayed"]
+            .max()
+        )
+
+        all_metrics_df = all_metrics_df.merge(
+            minutes_lookup,
+            on=["playerId", "matchId"],
+            how="left",
+            suffixes=("", "_lookup"),
+        )
+        if "minutesPlayed_lookup" in all_metrics_df.columns:
+            base_minutes = pd.to_numeric(all_metrics_df.get("minutesPlayed"), errors="coerce")
+            lookup_minutes = pd.to_numeric(all_metrics_df["minutesPlayed_lookup"], errors="coerce")
+            all_metrics_df["minutesPlayed"] = base_minutes.where(base_minutes.notna(), lookup_minutes)
+            all_metrics_df.drop(columns=["minutesPlayed_lookup"], inplace=True)
+
     # ---- Ensure the logged-in player is present
     mask_logged = all_metrics_df["playerId"] == logged_player_id
     if not mask_logged.any():
@@ -2360,6 +2613,20 @@ elif section == "Player Comparison":
     # ---- Aggregate KPIs per player
     grouped = all_metrics_df.groupby("playerId")
     summary_metrics_df = grouped[["playerName","teamName"]].first().reset_index()
+    all_metrics_df["_minutesPlayed_numeric"] = pd.to_numeric(
+        all_metrics_df.get("minutesPlayed", pd.Series(index=all_metrics_df.index, dtype=float)),
+        errors="coerce",
+    )
+    # Fallback to full-match minutes if a row still has no minutesPlayed.
+    fallback_minutes = all_metrics_df.groupby("playerId")["matchId"].transform("nunique").astype(float) * 90.0
+    all_metrics_df["_minutesPlayed_numeric"] = (
+        all_metrics_df["_minutesPlayed_numeric"]
+        .fillna(fallback_minutes)
+        .clip(lower=0.0)
+    )
+    player_total_minutes = (
+        all_metrics_df.groupby("playerId")["_minutesPlayed_numeric"].sum().replace(0, np.nan)
+    )
 
     for kpi in selected_kpis:
         metric_type = metric_type_map.get(kpi, "aggregate")
@@ -2374,8 +2641,12 @@ elif section == "Player Comparison":
                 summary_metrics_df[kpi] = np.nan
         else:
             if kpi in all_metrics_df.columns:
-                total = grouped[kpi].sum()
-                summary_metrics_df[kpi] = summary_metrics_df["playerId"].map(total.round(1))
+                total = pd.to_numeric(grouped[kpi].sum(), errors="coerce")
+                if use_per90_for_non_pct:
+                    per90 = (total / player_total_minutes) * 90.0
+                    summary_metrics_df[kpi] = summary_metrics_df["playerId"].map(per90.round(2))
+                else:
+                    summary_metrics_df[kpi] = summary_metrics_df["playerId"].map(total.round(1))
             else:
                 summary_metrics_df[kpi] = np.nan
 
@@ -2392,12 +2663,95 @@ elif section == "Player Comparison":
 
     summary_metrics_df = summary_metrics_df.fillna(0)
 
+    # Equal-weight performance score based on selected KPIs (min-max normalized per KPI).
+    perf_kpis = [k for k in selected_kpis if k in summary_metrics_df.columns]
+    if perf_kpis:
+        perf_base = summary_metrics_df[perf_kpis].apply(pd.to_numeric, errors="coerce")
+        perf_norm = pd.DataFrame(index=perf_base.index)
+        for col in perf_kpis:
+            col_vals = perf_base[col]
+            col_min = col_vals.min(skipna=True)
+            col_max = col_vals.max(skipna=True)
+            if pd.isna(col_min) or pd.isna(col_max) or col_max == col_min:
+                perf_norm[col] = 50.0
+            else:
+                perf_norm[col] = ((col_vals - col_min) / (col_max - col_min)) * 100.0
+
+        summary_metrics_df["Performance Score"] = (
+            perf_norm.mean(axis=1).fillna(0.0).clip(lower=0.0, upper=100.0).round(1)
+        )
+    else:
+        summary_metrics_df["Performance Score"] = 0.0
+
+    # Update the players list table with the computed Performance KPI.
+    if "playerId" in summary_display.columns:
+        performance_lookup = summary_metrics_df[["playerId", "Performance Score"]].copy()
+        performance_lookup["playerId"] = performance_lookup["playerId"].astype(str)
+        summary_display["playerId"] = summary_display["playerId"].astype(str)
+        summary_display = summary_display.merge(performance_lookup, on="playerId", how="left")
+        summary_display["Performance Score"] = pd.to_numeric(
+            summary_display["Performance Score"], errors="coerce"
+        ).fillna(0.0).round(1)
+        player_list_table_placeholder.dataframe(
+            summary_display[summary_table_columns + ["Performance Score"]],
+            use_container_width=True,
+        )
+
+    st.info("Performance Score (Equal-Weight KPI Mean)")
+    if use_per90_for_non_pct:
+        st.caption(
+            "Performance Score is the mean of all selected KPIs with equal weight, using per-90 values for non-% KPIs "
+            "and weighted ratios for % KPIs. The dashed red line shows the mean of selected players."
+        )
+    else:
+        st.caption(
+            "Performance Score is the mean of all selected KPIs with equal weight, using totals for non-% KPIs "
+            "and weighted ratios for % KPIs. The dashed red line shows the mean of selected players."
+        )
+    performance_chart_data = summary_metrics_df[["playerName", "Performance Score"]].copy().sort_values(
+        by="Performance Score",
+        ascending=False,
+    )
+    performance_chart_data["color"] = performance_chart_data["playerName"].apply(
+        lambda name: "#FFD700" if name == player_name else "#d3d3d3"
+    )
+    fig_perf = px.bar(
+        performance_chart_data,
+        x="playerName",
+        y="Performance Score",
+        title="Performance Score",
+        color="color",
+        color_discrete_map="identity",
+        hover_data=["playerName", "Performance Score"],
+        labels={"Performance Score": "Performance Score"},
+        height=320,
+    )
+    performance_mean = performance_chart_data["Performance Score"].mean()
+    fig_perf.add_hline(
+        y=performance_mean,
+        line_dash="dash",
+        line_color="red",
+        annotation_text=f"Mean of selected players: {performance_mean:.2f}",
+        annotation_position="top right",
+    )
+    fig_perf.update_yaxes(range=[0, 100])
+    fig_perf.update_layout(xaxis_title="Player", yaxis_title="Performance Score", showlegend=False)
+    st.plotly_chart(fig_perf, use_container_width=True)
+
     # --- Charts ---
-    st.info("Comparison by KPI")
+    if use_per90_for_non_pct:
+        st.info("Comparison by KPI (Per 90 for non-% metrics)")
+    else:
+        st.info("Comparison by KPI")
 
     for kpi in selected_kpis:
         if kpi not in summary_metrics_df.columns:
             continue
+
+        is_percentage_metric = metric_type_map.get(kpi) == "percentage"
+        kpi_display_label = metric_labels.get(kpi, kpi)
+        if use_per90_for_non_pct and not is_percentage_metric:
+            kpi_display_label = f"{kpi_display_label} (per 90)"
 
         chart_data = summary_metrics_df[["playerName", kpi]].copy().sort_values(by=kpi, ascending=False)
         chart_data["color"] = chart_data["playerName"].apply(
@@ -2413,11 +2767,11 @@ elif section == "Player Comparison":
             chart_data,
             x="playerName",
             y=kpi,
-            title=metric_labels.get(kpi, kpi),
+            title=kpi_display_label,
             color="color",
             color_discrete_map="identity",
             hover_data=tooltip_fields,
-            labels={kpi: metric_labels.get(kpi, kpi)},
+            labels={kpi: kpi_display_label},
             height=300
         )
 
@@ -2430,10 +2784,10 @@ elif section == "Player Comparison":
             annotation_position="top right"
         )
 
-        if metric_type_map.get(kpi) == "percentage":
+        if is_percentage_metric:
             fig.update_yaxes(range=[0, 100])
 
-        fig.update_layout(xaxis_title="Player", yaxis_title=metric_labels.get(kpi, kpi), showlegend=False)
+        fig.update_layout(xaxis_title="Player", yaxis_title=kpi_display_label, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
     st.expander("### Players Stats KPI Comparison")

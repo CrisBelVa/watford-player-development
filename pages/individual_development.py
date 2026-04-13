@@ -12,6 +12,7 @@ import io
 import streamlit.components.v1 as components
 from utils.pdf_generator import generate_individual_development_report_landscape
 from utils.sheets_client import GoogleSheetsClient
+from utils.pdf_cover_photos import list_cover_photos, save_cover_photo
 
 
 # --- Configuración de página ---
@@ -46,9 +47,82 @@ def load_logo():
 
 logo = load_logo()
 
-@st.cache_resource(show_spinner=False)
 def get_sheets_client() -> GoogleSheetsClient:
-    return GoogleSheetsClient()
+    cache_key = "_individual_development_sheets_client"
+    cached_client = st.session_state.get(cache_key)
+    if isinstance(cached_client, GoogleSheetsClient):
+        return cached_client
+
+    client = GoogleSheetsClient()
+    st.session_state[cache_key] = client
+    return client
+
+
+if hasattr(st, "dialog"):
+    @st.dialog("PDF Cover Photo")
+    def _pdf_cover_photo_dialog(player_key: str, player_label: str, session_key: str, key_prefix: str):
+        st.caption("Upload a player photo and keep it in history for future PDF reports.")
+        uploaded_photo = st.file_uploader(
+            "Upload player photo",
+            type=["jpg", "jpeg", "png", "webp"],
+            key=f"{key_prefix}_upload",
+        )
+        if st.button("Save uploaded photo", key=f"{key_prefix}_save_upload"):
+            if uploaded_photo is None:
+                st.warning("Please upload an image first.")
+            else:
+                try:
+                    saved_path = save_cover_photo(
+                        uploaded_file=uploaded_photo,
+                        base_dir=BASE_DIR,
+                        player_key=player_key,
+                    )
+                    st.session_state[session_key] = saved_path
+                    st.success("Photo saved and set as active cover.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not save photo: {exc}")
+
+        history = list_cover_photos(base_dir=BASE_DIR, player_key=player_key)
+        if not history:
+            st.info(f"No saved cover photos yet for {player_label}.")
+            if st.button("Use no photo", key=f"{key_prefix}_none_only"):
+                st.session_state[session_key] = None
+                st.success("PDF cover will use no player photo.")
+            return
+
+        options = [None] + [item["path"] for item in history]
+        labels = {None: "No photo"}
+        for item in history:
+            labels[item["path"]] = item["label"]
+
+        current_value = st.session_state.get(session_key)
+        if current_value not in options:
+            current_value = history[0]["path"]
+            st.session_state[session_key] = current_value
+
+        selected_value = st.selectbox(
+            "Photo history",
+            options=options,
+            index=options.index(current_value) if current_value in options else 0,
+            format_func=lambda value: labels.get(value, "No photo"),
+            key=f"{key_prefix}_history_select",
+        )
+        if selected_value and os.path.exists(selected_value):
+            st.image(selected_value, width=220, caption="Cover preview")
+
+        col_apply, col_clear = st.columns(2)
+        with col_apply:
+            if st.button("Use selected photo", key=f"{key_prefix}_apply"):
+                st.session_state[session_key] = selected_value
+                st.success("Active cover photo updated.")
+        with col_clear:
+            if st.button("Use no photo", key=f"{key_prefix}_clear"):
+                st.session_state[session_key] = None
+                st.success("PDF cover will use no player photo.")
+else:
+    def _pdf_cover_photo_dialog(*args, **kwargs):
+        st.warning("This Streamlit version does not support popup dialogs.")
 
 def _read_local_training_file() -> pd.DataFrame:
     if not LOCAL_TRAINING_FILE.exists():
@@ -1056,9 +1130,35 @@ elif page == "Players Profile":
     st.markdown("---")
     st.subheader("PDF Report")
 
+    cover_player_key = f"individual_{jugador_id}_{jugador_seleccionado}"
+    cover_session_key = f"individual_profile_cover_photo_path_{jugador_id}"
+    if cover_session_key not in st.session_state:
+        history = list_cover_photos(base_dir=BASE_DIR, player_key=cover_player_key)
+        st.session_state[cover_session_key] = history[0]["path"] if history else None
+
+    if st.button("Manage player cover photo", key="manage_individual_profile_cover_photo"):
+        _pdf_cover_photo_dialog(
+            player_key=cover_player_key,
+            player_label=jugador_seleccionado,
+            session_key=cover_session_key,
+            key_prefix=f"individual_pdf_cover_{jugador_id}",
+        )
+
+    selected_cover_photo_path = st.session_state.get(cover_session_key)
+    if selected_cover_photo_path and os.path.exists(selected_cover_photo_path):
+        st.caption("Active player cover photo")
+        st.image(selected_cover_photo_path, width=140)
+    else:
+        st.caption("No player cover photo selected.")
+
+    cover_photo_signature = "none"
+    if selected_cover_photo_path and os.path.exists(selected_cover_photo_path):
+        cover_photo_signature = f"{selected_cover_photo_path}:{int(os.path.getmtime(selected_cover_photo_path))}"
+
     report_signature = (
         f"{jugador_seleccionado}|{fecha_inicio}|{fecha_fin}|"
-        f"{','.join(sorted(selected_types_for_pdf))}|{len(df_pdf_activities)}"
+        f"{','.join(sorted(selected_types_for_pdf))}|{len(df_pdf_activities)}|"
+        f"{cover_photo_signature}"
     )
     if st.session_state.get("individual_profile_pdf_signature") != report_signature:
         st.session_state["individual_profile_pdf_signature"] = report_signature
@@ -1141,6 +1241,7 @@ elif page == "Players Profile":
                             fig_timeline=pdf_timeline_fig,
                             logo_path=LOGO_PATH,
                             background_image_path=BACKGROUND_COVER_PATH if os.path.exists(BACKGROUND_COVER_PATH) else None,
+                            player_photo_path=selected_cover_photo_path if (selected_cover_photo_path and os.path.exists(selected_cover_photo_path)) else None,
                         )
 
                     if not pdf_bytes:

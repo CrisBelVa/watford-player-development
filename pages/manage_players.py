@@ -72,9 +72,15 @@ if st.session_state.get("user_type") != "staff":
 # --- Helpers -------------------------------------------------
 PLAYERS_FILE_XLSX = os.path.join(BASE_DIR, "data", "watford_players_login_info.xlsx")
 
-@st.cache_resource(show_spinner=False)
 def get_sheets_client() -> GoogleSheetsClient:
-    return GoogleSheetsClient()
+    cache_key = "_manage_players_sheets_client"
+    cached_client = st.session_state.get(cache_key)
+    if isinstance(cached_client, GoogleSheetsClient):
+        return cached_client
+
+    client = GoogleSheetsClient()
+    st.session_state[cache_key] = client
+    return client
 
 @st.cache_data(show_spinner=False)
 def load_players_df(path: str) -> pd.DataFrame:
