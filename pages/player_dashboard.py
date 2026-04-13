@@ -9,7 +9,6 @@ import base64
 import os
 import datetime
 from sqlalchemy import text
-from datetime import timedelta
 from PIL import Image
 from db_utils import connect_to_db, load_player_data, load_event_data_for_matches, get_player_position, process_player_metrics
 from db_utils import get_all_players, process_player_comparison_metrics
@@ -18,6 +17,8 @@ from typing import Tuple, Dict, Any
 from sqlalchemy import create_engine
 from pandas.io.formats.style import Styler
 import streamlit.components.v1 as components  # ✅ needed for working HTML injection
+from player_ids import normalize_whoscored_player_id, whoscored_player_url
+from utils.sheets_client import GoogleSheetsClient
 
 # Optional: helper to navigate between pages
 try:
@@ -30,6 +31,7 @@ except ModuleNotFoundError:
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG_DIR = os.path.join(BASE_DIR, 'img')
 LOGO_PATH = os.path.join(IMG_DIR, 'watford_logo.png')
+BACKGROUND_COVER_PATH = os.path.join(IMG_DIR, "Watford_portada_d.jpg")
 
 st.set_page_config(
     page_title="Watford Player Development Hub",
@@ -37,6 +39,16 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+@st.cache_resource(show_spinner=False)
+def get_sheets_client() -> GoogleSheetsClient:
+    return GoogleSheetsClient()
+
+
+def _safe_pdf_filename(name: str) -> str:
+    sanitized = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(name or "").strip())
+    sanitized = sanitized.strip("_")
+    return sanitized or "player_report"
 
 # === AUTHENTICATION CHECK ===
 if "logged_in" not in st.session_state or not st.session_state.logged_in:
@@ -145,22 +157,39 @@ components.html(
 
 def load_players_list() -> Dict[str, Dict[str, Any]]:
     """
-    Load players from data/watford_players_login_info.[xlsx|csv].
+    Load players from Google Sheets tab 'Players' (fallback local file).
     Normalizes playerId to STRING (or None) to avoid dtype issues in the UI.
     """
     try:
-        base_csv = os.path.join('data', 'watford_players_login_info.csv')
-        base_xlsx = os.path.join('data', 'watford_players_login_info.xlsx')
+        players_df = None
+        sheets_client = get_sheets_client()
+        if sheets_client.is_configured():
+            try:
+                players_df = sheets_client.read_players_df()
+            except Exception as exc:
+                st.warning(f"Could not read 'Players' from Google Sheets. Falling back to local file. ({exc})")
 
-        if os.path.exists(base_csv):
-            players_df = pd.read_csv(base_csv, dtype={"playerId": "string"})
-        elif os.path.exists(base_xlsx):
-            players_df = pd.read_excel(base_xlsx, converters={"playerId": lambda x: str(x).strip() if pd.notna(x) else None})
-        else:
-            st.warning("No players file found. Upload CSV/XLSX with columns: playerId, playerName, activo.")
-            return {}
+        if players_df is None:
+            base_csv = os.path.join('data', 'watford_players_login_info.csv')
+            base_xlsx = os.path.join('data', 'watford_players_login_info.xlsx')
+
+            if os.path.exists(base_csv):
+                players_df = pd.read_csv(base_csv, dtype={"internal_id": "string", "playerId": "string"})
+            elif os.path.exists(base_xlsx):
+                players_df = pd.read_excel(
+                    base_xlsx,
+                    converters={
+                        "internal_id": lambda x: str(x).strip() if pd.notna(x) else None,
+                        "playerId": lambda x: str(x).strip() if pd.notna(x) else None,
+                    },
+                )
+            else:
+                st.warning("No players source found. Configure Google Sheets tab 'Players' or local CSV/XLSX.")
+                return {}
 
         players_df.columns = [str(c).strip() for c in players_df.columns]
+        if "internal_id" not in players_df.columns:
+            players_df["internal_id"] = None
 
         if 'playerName' not in players_df.columns:
             st.error("❌ Column 'playerName' is required in the players file.")
@@ -176,6 +205,8 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
             players_df['playerId'] = players_df['playerId'].astype('string')
             players_df['playerId'] = players_df['playerId'].where(players_df['playerId'].notna(), None)
             players_df['playerId'] = players_df['playerId'].apply(lambda x: x.strip() if isinstance(x, str) else x)
+            players_df["playerId"] = players_df["playerId"].apply(normalize_whoscored_player_id)
+            players_df["playerId"] = players_df["playerId"].astype("string").where(players_df["playerId"].notna(), None)
         else:
             st.warning("⚠️ Column 'playerId' not found. Some features may fail.")
 
@@ -185,12 +216,18 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
             if not full_name:
                 continue
             pid = row.get('playerId', None) if has_id else None
+            internal_id = str(row.get("internal_id", "")).strip()
             activo = int(row.get('activo', 1))
-            label = f"{full_name}{'' if activo == 1 else ' (Inactive)'}"
+            id_suffix = f" [{internal_id}]" if internal_id else ""
+            label = f"{full_name}{id_suffix}{'' if activo == 1 else ' (Inactive)'}"
             # Handle pandas NA values properly
             if pd.isna(pid) or pid in (None, "", "nan"):
                 pid = None
+            else:
+                pid_str = str(pid).strip()
+                pid = pid_str if pid_str.isdigit() else None
             players[label] = {
+                "internal_id": internal_id or None,
                 "playerId": pid,
                 "playerName": full_name,
                 "activo": activo,
@@ -199,7 +236,7 @@ def load_players_list() -> Dict[str, Dict[str, Any]]:
         return players
 
     except Exception as e:
-        st.error(f"❌ Error loading players list: {e}")
+        st.error(f"❌ Error loading players source: {e}")
         import traceback
         st.error(traceback.format_exc())
         return {}
@@ -264,9 +301,14 @@ def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
         sel = filtered[selected]
         pid = sel.get("playerId")
         pname = sel.get("playerName", "")
+        internal_id = sel.get("internal_id")
 
         if pid is None or str(pid).strip() == "":
-            st.error("Selected player has no 'playerId'. Add a 'playerId' column to your players file.")
+            extra = f" (internal_id: {internal_id})" if internal_id else ""
+            st.error(
+                "Selected player has no WhoScored 'playerId'. "
+                f"Assign one in Manage Players to open match-based dashboard data{extra}."
+            )
             st.stop()
 
         # Always return strings
@@ -370,6 +412,9 @@ inject_sidebar_logo()
 
 # Page title
 st.title(f"{player_name}")
+whoscored_url = whoscored_player_url(player_id)
+if whoscored_url:
+    st.markdown(f"[WhoScored]({whoscored_url})")
 
 # --- Load Data ---
 
@@ -477,7 +522,7 @@ metric_labels = {
     "goals": "Goals",
     "assists": "Assists",
     "xG": "Expected Goals (xG)",
-    "xA": "Expected Assists (xA)",
+    "xA": "Assisted Shots",
     "ps_xG": "Post-Shot xG",
     "recoveries": "Recoveries",
     "interceptions": "Interceptions",
@@ -497,6 +542,43 @@ metric_labels = {
     "shotsOnPost": "Shots on Post",
     "save_pct": "Saves Success %",
      "goals_conceded": "Goals Conceded"
+}
+
+# KPI glossary text shown in the KPI selector info popup
+metric_definitions = {
+    "pass_completion_pct": "Percentage of completed passes out of total passes.",
+    "key_passes": "Passes that directly create a teammate shot attempt.",
+    "aerial_duel_pct": "Percentage of aerial duels won.",
+    "take_on_success_pct": "Percentage of successful dribbles/take-ons.",
+    "goal_creating_actions": "Actions that directly lead to a goal.",
+    "shot_creating_actions": "Actions that directly lead to a shot.",
+    "shots_on_target_pct": "Percentage of shots that are on target.",
+    "passes_into_penalty_area": "Completed passes played into the penalty area.",
+    "carries_into_final_third": "Ball carries that enter the final third.",
+    "carries_into_penalty_area": "Ball carries that enter the penalty area.",
+    "goals": "Total goals scored.",
+    "assists": "Total assists provided.",
+    "xG": "Expected goals based on shot quality.",
+    "xA": "Expected assists based on chance creation quality.",
+    "ps_xG": "Post-shot expected goals based on shot placement and power.",
+    "recoveries": "Times the player regains possession for their team.",
+    "interceptions": "Passes/interactions stopped by anticipating play.",
+    "clearances": "Defensive actions that remove danger from the area.",
+    "crosses": "Crosses attempted into attacking areas.",
+    "long_pass_pct": "Percentage of successful long passes.",
+    "progressive_passes": "Forward passes that significantly move play toward goal.",
+    "progressive_carry_distance": "Distance advanced while carrying the ball forward.",
+    "totalSaves": "Total goalkeeper saves.",
+    "claimsHigh": "High balls claimed/caught by the goalkeeper.",
+    "collected": "Loose balls collected safely by the goalkeeper.",
+    "def_actions_outside_box": "Goalkeeper defensive actions outside the penalty area.",
+    "throwin_accuracy_pct": "Percentage of accurate throw-ins.",
+    "tackle_success_pct": "Percentage of tackles won.",
+    "shotsBlocked": "Shots blocked by the player.",
+    "shotsOffTarget": "Shots taken that miss the target.",
+    "shotsOnPost": "Shots that hit the post or crossbar.",
+    "save_pct": "Percentage of shots on target faced that are saved.",
+    "goals_conceded": "Goals allowed by the team while this player is in goal.",
 }
 
 # Metric type: affects delta logic
@@ -580,10 +662,21 @@ percentage_formula_map = {
     }
 
 # Get the metrics player position
+position_default_kpis_raw = position_kpi_map.get(player_position, [])
+available_kpis = [k for k in metric_labels.keys() if k in metrics_summary.columns]
+position_default_kpis = [k for k in position_default_kpis_raw if k in available_kpis]
+if position_default_kpis_raw and not position_default_kpis:
+    st.warning(f"Default KPIs for position '{player_position}' are not available in this dataset.")
+elif not position_default_kpis_raw:
+    st.warning(f"No default KPIs found for position: {player_position}.")
 
-selected_kpis = position_kpi_map.get(player_position, [])
-if not selected_kpis:
-    st.error(f"⚠️ No KPIs found for position: {player_position}")
+all_kpi_options = []
+for kpi in position_default_kpis + available_kpis:
+    if kpi not in all_kpi_options:
+        all_kpi_options.append(kpi)
+
+if not all_kpi_options:
+    all_kpi_options = [k for k in metric_type_map.keys() if k in metrics_summary.columns]
 
 
 # ---------------------------
@@ -679,55 +772,42 @@ def add_match_dates(df: pd.DataFrame, match_data_df: pd.DataFrame):
 
 # ---- DELTAS ----
 
-def calculate_delta(filtered_df: pd.DataFrame, full_df: pd.DataFrame, column: str) -> Tuple[float, float]:
-    """
-    Calculates delta between filtered data (e.g., last 3 matches) and full season.
+def compute_metric_average(df: pd.DataFrame, column: str) -> float:
+    """Compute metric value per period (percentage from weighted ratios, others per match)."""
+    if df.empty:
+        return 0.0
 
-    - For percentage metrics: calculate from numerator / denominator columns.
-    - For count metrics: average per match.
-    """
     metric_type = metric_type_map.get(column, "per_match")
-    if filtered_df.empty or full_df.empty:
-        return 0.0, 0.0
-
-    # For percentage metrics where we know the base columns
-    percentage_formula_map = {
-        "pass_completion_pct": ("passesAccurate", "passesTotal"),
-        "aerial_duel_pct": ("aerialsWon", "aerialsTotal"),
-        "take_on_success_pct": ("dribblesWon", "dribblesAttempted"),
-        "shots_on_target_pct": ("shotsOnTarget", "shotsTotal"),
-        "tackle_success_pct": ("tackleSuccessful", "tacklesTotal"),
-        "throwin_accuracy_pct": ("throwInsAccurate", "throwInsTotal"),
-        "long_pass_pct": ("long_passes_success", "long_passes_total"),
-    }
-
     if metric_type == "percentage" and column in percentage_formula_map:
         num_col, denom_col = percentage_formula_map[column]
-        try:
-            filtered_num = filtered_df[num_col].sum()
-            filtered_denom = filtered_df[denom_col].sum()
-            season_num = full_df[num_col].sum()
-            season_denom = full_df[denom_col].sum()
+        if num_col in df.columns and denom_col in df.columns:
+            numerator = pd.to_numeric(df[num_col], errors="coerce").fillna(0).sum()
+            denominator = pd.to_numeric(df[denom_col], errors="coerce").fillna(0).sum()
+            return float((numerator / denominator) * 100) if denominator != 0 else 0.0
 
-            filtered_value = (filtered_num / filtered_denom) * 100 if filtered_denom != 0 else 0
-            season_value = (season_num / season_denom) * 100 if season_denom != 0 else 0
-        except Exception:
-            filtered_value = filtered_df[column].mean()
-            season_value = full_df[column].mean()
+    if column not in df.columns:
+        return 0.0
 
-    elif metric_type == "percentage":
-        # Fallback: average the values if we don't know the exact formula
-        filtered_value = filtered_df[column].mean()
-        season_value = full_df[column].mean()
+    series = pd.to_numeric(df[column], errors="coerce")
+    if metric_type == "percentage":
+        mean_val = series.mean()
+        return 0.0 if pd.isna(mean_val) else float(mean_val)
 
-    else:
-        # For count metrics: average per match
-        filtered_value = filtered_df[column].sum() / max(1, len(filtered_df))
-        season_value  = full_df[column].sum() / max(1, len(full_df))
+    return float(series.fillna(0).sum() / max(1, len(df)))
 
-    delta = filtered_value - season_value
-    delta_percent = (delta / season_value * 100) if season_value != 0 else 0
 
+def calculate_delta(delta_df: pd.DataFrame, reference_df: pd.DataFrame, column: str) -> Tuple[float, float]:
+    """
+    Calculates delta between Delta window and Reference window for one metric.
+    """
+    if delta_df.empty or reference_df.empty:
+        return 0.0, 0.0
+
+    delta_value = compute_metric_average(delta_df, column)
+    reference_value = compute_metric_average(reference_df, column)
+
+    delta = delta_value - reference_value
+    delta_percent = (delta / reference_value * 100) if reference_value != 0 else 0
     return round(delta, 1), round(delta_percent, 1)
 
 
@@ -751,10 +831,10 @@ def format_metric_value(value, column):
         return f"{int(round(value))}"
 
 
-def display_metric_card(col, title, value, filtered_df, full_df, column, color=None):
+def display_metric_card(col, title, value, delta_df, reference_df, column, color=None):
     with col:
         with st.container(border=True):
-            delta, delta_percent = calculate_delta(filtered_df, full_df, column)
+            delta, delta_percent = calculate_delta(delta_df, reference_df, column)
             arrow = "▲" if delta > 0 else "▼" if delta < 0 else ""
 
             # Format value
@@ -766,31 +846,31 @@ def display_metric_card(col, title, value, filtered_df, full_df, column, color=N
 
             # Related raw metric values
             for extra_field in metric_tooltip_fields.get(column, []):
-                if extra_field in filtered_df.columns:
-                    raw_val = filtered_df[extra_field].sum()
+                if extra_field in delta_df.columns:
+                    raw_val = delta_df[extra_field].sum()
                     label = metric_labels.get(extra_field, extra_field.replace("_", " ").title())
-                    tooltip_lines.append(f"{label}: {int(raw_val)}")
+                    tooltip_lines.append(f"{label} (Delta): {int(raw_val)}")
 
-            # Avg Season and Avg Match logic
+            # Avg Reference vs Delta logic
             if metric_type == "percentage" and column in percentage_formula_map:
                 num_col, denom_col = percentage_formula_map[column]
-                season_num = full_df[num_col].sum()
-                season_denom = full_df[denom_col].sum()
-                match_num = filtered_df[num_col].sum()
-                match_denom = filtered_df[denom_col].sum()
+                ref_num = pd.to_numeric(reference_df.get(num_col, pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+                ref_denom = pd.to_numeric(reference_df.get(denom_col, pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+                delta_num = pd.to_numeric(delta_df.get(num_col, pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+                delta_denom = pd.to_numeric(delta_df.get(denom_col, pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
 
-                season_avg = (season_num / season_denom) * 100 if season_denom != 0 else 0
-                match_avg = (match_num / match_denom) * 100 if match_denom != 0 else 0
+                reference_avg = (ref_num / ref_denom) * 100 if ref_denom != 0 else 0
+                delta_avg = (delta_num / delta_denom) * 100 if delta_denom != 0 else 0
 
-                tooltip_lines.append(f"Avg Season: {season_avg:.1f}%")
-                tooltip_lines.append(f"Avg Match Filtered: {match_avg:.1f}%")
+                tooltip_lines.append(f"Avg Reference: {reference_avg:.1f}%")
+                tooltip_lines.append(f"Avg Delta: {delta_avg:.1f}%")
 
-            elif column in full_df.columns:
-                season_avg = full_df[column].sum() / max(1, len(full_df))
-                match_avg = filtered_df[column].sum() / max(1, len(filtered_df))
+            else:
+                reference_avg = compute_metric_average(reference_df, column)
+                delta_avg = compute_metric_average(delta_df, column)
                 suffix = "%" if metric_type == "percentage" else ""
-                tooltip_lines.append(f"Avg Season: {season_avg:.1f}{suffix}")
-                tooltip_lines.append(f"Avg Match: {match_avg:.1f}{suffix}")
+                tooltip_lines.append(f"Avg Reference: {reference_avg:.1f}{suffix}")
+                tooltip_lines.append(f"Avg Delta: {delta_avg:.1f}{suffix}")
 
             # Tooltip as hover title
             tooltip_html = "&#013;".join(tooltip_lines)
@@ -863,9 +943,9 @@ if non_null_rate == 0:
     st.stop()
 
 # ------------------------------
-# Sidebar: Season (on top) + Time (both roles)
+# Main area: Season + Time + fixed comparison + KPI selection
 # ------------------------------
-st.sidebar.header("Season & Time Filters")
+st.markdown("### Filters")
 
 # 1) Season selector (only if season exists)
 if "season" in metrics_summary.columns:
@@ -880,7 +960,7 @@ if "season" in metrics_summary.columns:
     )
     # Prefer most recent as default if you like; here we keep "All seasons".
     season_options = ["All seasons"] + seasons
-    season_choice = st.sidebar.selectbox("Season", options=season_options, index=0)
+    season_choice = st.selectbox("Season", options=season_options, index=0)
     if season_choice == "All seasons":
         st.session_state.selected_season = None   # means no explicit season filter
     else:
@@ -897,35 +977,187 @@ else:
     # Fallback: no season column
     season_filtered = metrics_summary
 
-# 2) Time range (constrained by the season-filtered rows)
+# 2) Time ranges (constrained by the season-filtered rows)
 valid_dates = season_filtered["matchDate"].dropna()
+
+def normalize_date_range(value, default_start, default_end):
+    if isinstance(value, tuple) and len(value) == 2:
+        start, end = value
+    else:
+        start, end = default_start, default_end
+    return (start, end) if start <= end else (end, start)
+
+def clamp_date_range(value, min_bound, max_bound):
+    start, end = normalize_date_range(value, min_bound, max_bound)
+    start = max(min_bound, min(start, max_bound))
+    end = max(min_bound, min(end, max_bound))
+    return (start, end) if start <= end else (min_bound, max_bound)
+
+delta_match_ids = set()
+reference_match_ids = set()
+comparison_mode_label = "Previous month"
+comparison_value_label = "1 month"
+
 if valid_dates.empty:
-    st.warning("No dated matches available to build a time filter. Showing all data.")
+    st.warning("No dated matches available to build time filters. Showing all data.")
+    today = pd.Timestamp.today().date()
+    analysis_start_date, analysis_end_date = today, today
+    delta_start_date, delta_end_date = today, today
+    reference_start_date, reference_end_date = today, today
     filtered_df = season_filtered.copy()
+    reference_filtered_df = season_filtered.copy()
 else:
     min_date = valid_dates.min().date()
     max_date = valid_dates.max().date()
 
-    picked = st.sidebar.date_input(
-        "Select date range",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date
+    st.markdown("**1) Analysis Window**")
+    analysis_default = clamp_date_range(
+        st.session_state.get("analysis_date_range", (min_date, max_date)),
+        min_date,
+        max_date,
     )
-    start_date, end_date = (
-        picked if isinstance(picked, tuple) and len(picked) == 2 else (min_date, max_date)
+    picked_analysis = st.date_input(
+        "Analysis date range",
+        value=analysis_default,
+        min_value=min_date,
+        max_value=max_date,
+        key="analysis_date_range",
+    )
+    analysis_start_date, analysis_end_date = clamp_date_range(picked_analysis, min_date, max_date)
+
+    analysis_mask = (
+        season_filtered["matchDate"].dt.date >= analysis_start_date
+    ) & (
+        season_filtered["matchDate"].dt.date <= analysis_end_date
+    )
+    analysis_filtered = season_filtered.loc[analysis_mask].copy()
+
+    st.caption(
+        f"Analysis matches: {int(analysis_filtered['matchId'].nunique()) if 'matchId' in analysis_filtered.columns else 0}"
     )
 
-    # 3) Apply date filter
-    mask = (
-        season_filtered["matchDate"].dt.date >= start_date
-    ) & (
-        season_filtered["matchDate"].dt.date <= end_date
-    )
-    filtered_df = season_filtered.loc[mask].copy()
-    if filtered_df.empty:
-        st.warning("No matches in the selected date range. Showing season selection only.")
-        filtered_df = season_filtered.copy()
+    if analysis_filtered.empty:
+        st.warning("No matches in Analysis range.")
+        delta_start_date, delta_end_date = analysis_start_date, analysis_end_date
+        reference_start_date, reference_end_date = analysis_start_date, analysis_end_date
+        filtered_df = analysis_filtered.copy()
+        reference_filtered_df = analysis_filtered.copy()
+    else:
+        st.markdown("**2) Comparison period**")
+        st.caption("Comparison is always against the previous calendar month.")
+        # Main stats use the full selected analysis window.
+        filtered_df = analysis_filtered.sort_values("matchDate").copy()
+        delta_start_date = analysis_start_date
+        delta_end_date = analysis_end_date
+        delta_match_ids = set(filtered_df["matchId"].dropna().tolist())
+
+        analysis_end_ts = pd.Timestamp(analysis_end_date)
+        reference_filtered_df = season_filtered.iloc[0:0].copy()
+        comparison_mode_label = "Previous month"
+        comparison_value_label = "1 month"
+        current_month_start = analysis_end_ts.to_period("M").start_time.normalize()
+        ref_start_ts = (current_month_start - pd.DateOffset(months=1)).normalize()
+        ref_end_ts = (current_month_start - pd.Timedelta(days=1)).normalize()
+        reference_filtered_df = season_filtered[
+            (season_filtered["matchDate"] >= ref_start_ts) &
+            (season_filtered["matchDate"] <= ref_end_ts)
+        ].copy()
+
+        reference_match_ids = set(reference_filtered_df["matchId"].dropna().tolist())
+        if reference_filtered_df.empty:
+            reference_start_date, reference_end_date = ref_start_ts.date(), ref_end_ts.date()
+            st.warning("No matches found in the selected reference. Delta values will show 0.")
+        else:
+            reference_start_date = reference_filtered_df["matchDate"].min().date()
+            reference_end_date = reference_filtered_df["matchDate"].max().date()
+
+        st.caption(
+            f"Main range: {delta_start_date.strftime('%d/%m/%Y')} -> {delta_end_date.strftime('%d/%m/%Y')}"
+        )
+        st.caption(
+            "Comparison period (previous month): "
+            f"{reference_start_date.strftime('%d/%m/%Y')} -> {reference_end_date.strftime('%d/%m/%Y')}"
+        )
+        st.caption(f"Selected matches: {int(filtered_df['matchId'].nunique()) if 'matchId' in filtered_df.columns else 0}")
+        st.caption(f"Comparison matches: {int(reference_filtered_df['matchId'].nunique()) if 'matchId' in reference_filtered_df.columns else 0}")
+
+st.markdown("**3) Data to display**")
+glossary_sorted = sorted(
+    all_kpi_options,
+    key=lambda k: metric_labels.get(k, k.replace("_", " ").title()).lower(),
+)
+
+def _build_kpi_glossary_df() -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "KPI": metric_labels.get(kpi, kpi.replace("_", " ").title()),
+            "Definition": metric_definitions.get(kpi, "Definition not available."),
+        }
+        for kpi in glossary_sorted
+    ])
+
+if hasattr(st, "dialog"):
+    @st.dialog("KPI Dictionary")
+    def show_kpi_dictionary():
+        glossary_df = _build_kpi_glossary_df()
+        search_text = st.text_input(
+            "Search KPI or definition",
+            placeholder="e.g. xG, passes, aerial",
+            key="kpi_dictionary_search",
+        ).strip()
+        if search_text:
+            mask = (
+                glossary_df["KPI"].str.contains(search_text, case=False, na=False) |
+                glossary_df["Definition"].str.contains(search_text, case=False, na=False)
+            )
+            glossary_df = glossary_df[mask].copy()
+
+        st.dataframe(
+            glossary_df,
+            use_container_width=True,
+            hide_index=True,
+            height=520,
+        )
+        st.caption(f"Showing {len(glossary_df)} KPI definition(s).")
+
+    _, info_col_right = st.columns([5, 2])
+    with info_col_right:
+        if st.button("ℹ️ Open KPI Dictionary", use_container_width=True):
+            show_kpi_dictionary()
+else:
+    with st.expander("ℹ️ Open KPI Dictionary"):
+        glossary_df = _build_kpi_glossary_df()
+        search_text = st.text_input(
+            "Search KPI or definition",
+            placeholder="e.g. xG, passes, aerial",
+            key="kpi_dictionary_search_fallback",
+        ).strip()
+        if search_text:
+            mask = (
+                glossary_df["KPI"].str.contains(search_text, case=False, na=False) |
+                glossary_df["Definition"].str.contains(search_text, case=False, na=False)
+            )
+            glossary_df = glossary_df[mask].copy()
+
+        st.dataframe(glossary_df, use_container_width=True, hide_index=True, height=520)
+        st.caption(f"Showing {len(glossary_df)} KPI definition(s).")
+
+selected_kpis = st.multiselect(
+    "KPIs",
+    options=all_kpi_options,
+    default=position_default_kpis,
+    format_func=lambda k: metric_labels.get(k, k.replace("_", " ").title()),
+    key="selected_kpis_main",
+)
+st.caption("Default KPIs for the player position are preselected. You can add or remove any available KPI.")
+if not selected_kpis:
+    st.warning("Select at least one KPI to display.")
+
+if "selected_kpis" not in locals() or not selected_kpis:
+    selected_kpis = all_kpi_options[:1] if all_kpi_options else []
+
+# Keep current global date window for other sections as the Analysis window
+start_date, end_date = analysis_start_date, analysis_end_date
 
 # -- Dynamically assigned KPIs
 metric_keys = selected_kpis
@@ -1074,102 +1306,135 @@ if section == "Overview Stats":
     # Sort by date
     summary_df = summary_df.sort_values("matchDate")
 
-    # --- Apply global date filter (set earlier) ---
-    # IMPORTANT: ensure start_date/end_date are date objects (not strings)
-    mask = (
-        (summary_df["matchDate"].dt.date >= start_date) &
-        (summary_df["matchDate"].dt.date <= end_date)
-    )
-    filtered_df = summary_df.loc[mask].copy()
-    filtered_df.to_excel("filtered_df_lucas0.xlsx")
-    # Drop duplicated matchId
-    filtered_df = filtered_df.drop_duplicates(subset="matchId", keep="last")
-    filtered_df.to_excel("filtered_df_lucas2.xlsx")
-    # ⚠️ DO NOT blanket fillna(0) on the whole DF – it corrupts strings into ints (root cause of your error).
-    # Instead, only fill NaNs on numeric columns.
-    num_cols = filtered_df.select_dtypes(include=["number"]).columns
-    filtered_df[num_cols] = filtered_df[num_cols].fillna(0)
-    filtered_df.to_excel("filtered_df_lucas2.xlsx")
+    # --- Apply Main + Reference period filters ---
+    summary_df["matchDate"] = pd.to_datetime(summary_df["matchDate"], errors="coerce")
+    summary_df["match_date_only"] = summary_df["matchDate"].dt.date
+    summary_df["is_main_period"] = summary_df["matchId"].isin(delta_match_ids)
+    summary_df["is_reference_period"] = summary_df["matchId"].isin(reference_match_ids)
+
+    period_filtered_df = summary_df[
+        summary_df["is_main_period"] | summary_df["is_reference_period"]
+    ].copy()
+    period_filtered_df = period_filtered_df.drop_duplicates(subset="matchId", keep="last")
+
+    # Only fill NaNs for numeric columns.
+    num_cols = period_filtered_df.select_dtypes(include=["number"]).columns
+    period_filtered_df[num_cols] = period_filtered_df[num_cols].fillna(0)
+
     # Ensure team names are present (merge again if needed)
-    if "oppositionTeamName" not in filtered_df.columns:
+    if "oppositionTeamName" not in period_filtered_df.columns:
         teams_info = (
             event_data.groupby("matchId")[["teamName", "oppositionTeamName"]]
             .first()
             .reset_index()
         )
-        filtered_df = filtered_df.merge(teams_info, on="matchId", how="left")
+        period_filtered_df = period_filtered_df.merge(teams_info, on="matchId", how="left")
     else:
-        filtered_df = filtered_df.copy()
+        period_filtered_df = period_filtered_df.copy()
 
-    # if "oppositionTeamName" not in filtered_df.columns:
-    #     teams_info = (
-    #         event_data.groupby("matchId")[["teamName", "oppositionTeamName"]]
-    #         .first()
-    #         .reset_index()
-    #     )
-    #     filtered_df = filtered_df.merge(teams_info, on="matchId", how="left")
+    if period_filtered_df.empty:
+        st.info("No matches in the selected Main/Reference ranges.")
+        st.stop()
 
-    # --- Create readable match labels (robust casting to string) ---
-    date_str = filtered_df["matchDate"].dt.strftime("%Y-%m-%d").fillna("Unknown date")
-      
-    opp_str = filtered_df["oppositionTeamName"].astype("string").fillna("Unknown")
-    #opp_str = filtered_df["oppositionTeamName"]
-    filtered_df["match_label"] = date_str + " vs " + opp_str
-    filtered_df.to_excel("filtered_df_lucas3.xlsx")
+    # --- Create readable match labels and usage tags ---
+    period_filtered_df["period_tag"] = np.select(
+        [
+            period_filtered_df["is_main_period"] & period_filtered_df["is_reference_period"],
+            period_filtered_df["is_main_period"],
+            period_filtered_df["is_reference_period"],
+        ],
+        ["Selected + Comparison", "Selected period", "Comparison period"],
+        default="OUT",
+    )
+    date_str = period_filtered_df["matchDate"].dt.strftime("%Y-%m-%d").fillna("Unknown date")
+    opp_str = period_filtered_df["oppositionTeamName"].astype("string").fillna("Unknown")
+    period_filtered_df["match_label"] = (
+        date_str + " vs " + opp_str + " - " + period_filtered_df["period_tag"]
+    )
+
     # --- Match Filter Styled Like Excel ---
     with st.expander("Filter by Match (click to hide)", expanded=True):
+        st.caption("Filter matches used in the selected period and in the comparison period.")
         match_options = (
-            filtered_df[["matchId", "match_label", "matchDate"]]
+            period_filtered_df[["matchId", "match_label", "matchDate", "period_tag"]]
             .drop_duplicates()
             .sort_values("matchDate")
         )
+        all_match_ids = list(match_options["matchId"])
+        state_key = "selected_match_ids_kpi"
 
         # Search box
-        search_text = st.text_input("🔍 Search match:", "")
-
+        search_text = st.text_input("🔍 Search match:", "", key="match_search_kpi")
         filtered_options = match_options[
             match_options["match_label"].str.contains(search_text, case=False, na=False)
-        ]
+        ].copy()
+        visible_match_ids = list(filtered_options["matchId"])
+
+        # Initialize and normalize selected IDs in session state
+        if state_key not in st.session_state:
+            st.session_state[state_key] = all_match_ids
+        else:
+            st.session_state[state_key] = [mid for mid in st.session_state[state_key] if mid in all_match_ids]
 
         # Select all / clear buttons
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("Select All Matches"):
-                st.session_state.selected_match_ids = list(filtered_options["matchId"])
+            if st.button("Select All Matches", key="select_all_matches_kpi"):
+                st.session_state[state_key] = all_match_ids
+                for mid in all_match_ids:
+                    st.session_state[f"match_kpi_{mid}"] = True
         with col2:
-            if st.button("Clear Matches"):
-                st.session_state.selected_match_ids = []
+            if st.button("Clear Matches", key="clear_matches_kpi"):
+                st.session_state[state_key] = []
+                for mid in all_match_ids:
+                    st.session_state[f"match_kpi_{mid}"] = False
 
-        # Maintain session state (default = all currently visible)
-        default_ids = list(filtered_options["matchId"])
-        selected_ids = st.session_state.get("selected_match_ids", default_ids)
-        selected_match_ids = []
+        selected_ids = set(st.session_state[state_key])
+        selected_visible_ids = []
+        visible_set = set(visible_match_ids)
 
-        # Scrollable checkbox list
         st.markdown("<div style='max-height: 250px; overflow-y: auto; padding: 0 10px;'>", unsafe_allow_html=True)
         for _, row in filtered_options.iterrows():
-            checked = row["matchId"] in selected_ids
-            checkbox = st.checkbox(row["match_label"], value=checked, key=f"match_{row['matchId']}")
-            if checkbox:
-                selected_match_ids.append(row["matchId"])
+            mid = row["matchId"]
+            label = row["match_label"]
+            cb_key = f"match_kpi_{mid}"
+            if cb_key not in st.session_state:
+                st.session_state[cb_key] = mid in selected_ids
+            checked = st.checkbox(label, key=cb_key)
+            if checked:
+                selected_visible_ids.append(mid)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.session_state.selected_match_ids = selected_match_ids
-
-    st.caption(f"Showing Metrics for position: **{player_position}**")
+        hidden_selected = [mid for mid in st.session_state[state_key] if mid not in visible_set]
+        updated_set = set(hidden_selected) | set(selected_visible_ids)
+        st.session_state[state_key] = [mid for mid in all_match_ids if mid in updated_set]
 
     # Apply match filter (guard empty state)
-    current_selected = st.session_state.get("selected_match_ids", [])
+    current_selected = st.session_state.get("selected_match_ids_kpi", [])
     if current_selected:
-        filtered_df = filtered_df[filtered_df["matchId"].isin(current_selected)]
+        selected_matches_df = period_filtered_df[period_filtered_df["matchId"].isin(current_selected)].copy()
     else:
-        # If nothing selected, show nothing but avoid crashes
-        filtered_df = filtered_df.iloc[0:0]
+        selected_matches_df = period_filtered_df.iloc[0:0].copy()
 
     # Early exit if no rows after filters
-    if filtered_df.empty:
+    if selected_matches_df.empty:
         st.info("No matches in the selected filters.")
         st.stop()
+
+    main_df = selected_matches_df[selected_matches_df["is_main_period"]].copy()
+    reference_df = selected_matches_df[selected_matches_df["is_reference_period"]].copy()
+
+    if main_df.empty:
+        st.info("No selected-period matches chosen. Select at least one match.")
+        st.stop()
+    if reference_df.empty:
+        st.warning("No comparison-period matches selected. Delta values are shown as 0.")
+
+    st.caption(f"Showing Metrics for position: **{player_position}**")
+    st.caption(
+        f"Selected matches: {int(main_df['matchId'].nunique())} | "
+        f"Comparison matches: {int(reference_df['matchId'].nunique())}"
+    )
 
     # --- Set metric_keys dynamically by position ---
     metric_keys = selected_kpis
@@ -1183,7 +1448,7 @@ if section == "Overview Stats":
     aggregated_metrics = {}
 
     for key in metric_keys:
-        if key not in filtered_df.columns:
+        if key not in main_df.columns:
             aggregated_metrics[key] = 0
             continue
 
@@ -1191,25 +1456,25 @@ if section == "Overview Stats":
 
         # Custom logic for % metrics based on true numerators/denominators
         if key == "pass_completion_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(filtered_df, "passesAccurate", "passesTotal")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "passesAccurate", "passesTotal")
         elif key == "aerial_duel_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(filtered_df, "aerialsWon", "aerialsTotal")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "aerialsWon", "aerialsTotal")
         elif key == "take_on_success_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(filtered_df, "dribblesWon", "dribblesAttempted")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "dribblesWon", "dribblesAttempted")
         elif key == "shots_on_target_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(filtered_df, "shotsOnTarget", "shotsTotal")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "shotsOnTarget", "shotsTotal")
         elif key == "tackle_success_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(filtered_df, "tackleSuccessful", "tacklesTotal")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "tackleSuccessful", "tacklesTotal")
         elif key == "throwin_accuracy_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(filtered_df, "throwInsAccurate", "throwInsTotal")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "throwInsAccurate", "throwInsTotal")
         elif key == "long_pass_pct":
-            aggregated_metrics[key] = compute_weighted_percentage(filtered_df, "long_passes_success", "long_passes_total")
+            aggregated_metrics[key] = compute_weighted_percentage(main_df, "long_passes_success", "long_passes_total")
         else:
             # Sum or mean depending on type
             if metric_type == "percentage":
-                aggregated_metrics[key] = round(pd.to_numeric(filtered_df[key], errors="coerce").mean(), 1)
+                aggregated_metrics[key] = round(pd.to_numeric(main_df[key], errors="coerce").mean(), 1)
             else:
-                aggregated_metrics[key] = round(pd.to_numeric(filtered_df[key], errors="coerce").sum(), 2)
+                aggregated_metrics[key] = round(pd.to_numeric(main_df[key], errors="coerce").sum(), 2)
 
     # --- Scorecards (4 per row) ---
     metrics_per_row = 4
@@ -1220,10 +1485,233 @@ if section == "Overview Stats":
         for i, key in enumerate(chunk):
             label = metric_labels.get(key, key.replace("_", " ").title())
             value = aggregated_metrics.get(key, "N/A")
-            display_metric_card(cols[i], label, value, filtered_df, metrics_summary, key, color="#fcec03")
+            display_metric_card(cols[i], label, value, main_df, reference_df, key, color="#fcec03")
+
+    with st.expander("Export PDF Report", expanded=False):
+        season_value = st.session_state.get("selected_season") or "All seasons"
+        selected_match_map = dict(zip(match_options["matchId"], match_options["match_label"]))
+        selected_match_labels = [selected_match_map.get(mid, str(mid)) for mid in current_selected]
+
+        report_signature = (
+            f"{player_id}|{player_name}|{season_value}|"
+            f"{delta_start_date}|{delta_end_date}|{reference_start_date}|{reference_end_date}|"
+            f"{comparison_mode_label}|{comparison_value_label}|"
+            f"{','.join(str(mid) for mid in current_selected)}"
+        )
+        if st.session_state.get("player_report_pdf_signature") != report_signature:
+            st.session_state["player_report_pdf_signature"] = report_signature
+            st.session_state.pop("player_report_pdf_bytes", None)
+            st.session_state.pop("player_report_pdf_name", None)
+
+        generating_key = "player_report_pdf_generating"
+        auto_download_key = "player_report_pdf_auto_download_pending"
+        if generating_key not in st.session_state:
+            st.session_state[generating_key] = False
+        if auto_download_key not in st.session_state:
+            st.session_state[auto_download_key] = False
+
+        if st.button(
+            "Generate & Download PDF report",
+            key="generate_player_report_pdf",
+            type="primary",
+            disabled=st.session_state.get(generating_key, False),
+        ):
+            st.session_state[generating_key] = True
+            st.session_state[auto_download_key] = True
+            st.rerun()
+
+        if st.session_state.get(generating_key, False):
+            overlay_placeholder = st.empty()
+            overlay_placeholder.markdown(
+                """
+                <style>
+                  .pdf-generation-overlay {
+                    position: fixed;
+                    inset: 0;
+                    background: rgba(0, 0, 0, 0.45);
+                    z-index: 2147483000;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    pointer-events: all;
+                  }
+                  .pdf-generation-overlay-card {
+                    background: #111;
+                    color: #fff;
+                    padding: 1rem 1.25rem;
+                    border-radius: 12px;
+                    font-weight: 600;
+                    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+                  }
+                </style>
+                <div class="pdf-generation-overlay">
+                  <div class="pdf-generation-overlay-card">Generating PDF report... Please wait.</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            try:
+                try:
+                    from utils.pdf_generator import generate_player_report
+                except ModuleNotFoundError:
+                    st.error("Missing dependency for PDF generation. Install `fpdf2` and restart the app.")
+                except Exception as e:
+                    st.error(f"Could not load PDF generator: {e}")
+                else:
+                    try:
+                        games_played_pdf = int(main_df["matchId"].nunique()) if "matchId" in main_df.columns else int(games_played)
+                        if "isFirstEleven" in main_df.columns:
+                            games_starter_pdf = int(pd.to_numeric(main_df["isFirstEleven"], errors="coerce").fillna(0).sum())
+                        else:
+                            games_starter_pdf = int(games_as_starter)
+                        if "minutesPlayed" in main_df.columns:
+                            minutes_pdf = float(pd.to_numeric(main_df["minutesPlayed"], errors="coerce").fillna(0).sum())
+                        else:
+                            minutes_pdf = float(total_minutes)
+
+                        player_info_payload = {
+                            "age": age if pd.notna(age) else "N/A",
+                            "shirtNo": shirt_number if pd.notna(shirt_number) else "N/A",
+                            "height": height if pd.notna(height) else "N/A",
+                            "weight": weight if pd.notna(weight) else "N/A",
+                            "gamesPlayed": games_played_pdf,
+                            "gamesStarter": games_starter_pdf,
+                            "minutesPlayed": minutes_pdf,
+                        }
+
+                        filters_data = {
+                            "season": season_value,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "delta_start_date": delta_start_date,
+                            "delta_end_date": delta_end_date,
+                            "reference_start_date": reference_start_date,
+                            "reference_end_date": reference_end_date,
+                            "comparison_mode": comparison_mode_label,
+                            "comparison_value": comparison_value_label,
+                            "selected_matches": selected_match_labels,
+                        }
+
+                        # Build Trends charts for PDF (same player, selected main matches).
+                        trends_data_pdf = []
+                        trends_source_df = main_df.copy()
+                        if not trends_source_df.empty and "matchDate" in trends_source_df.columns:
+                            trends_source_df["matchDate"] = pd.to_datetime(trends_source_df["matchDate"], errors="coerce")
+                            trends_source_df = trends_source_df[trends_source_df["matchDate"].notna()].sort_values("matchDate")
+                            if "oppositionTeamName" not in trends_source_df.columns:
+                                trends_source_df["oppositionTeamName"] = "Unknown"
+                            trends_source_df["oppositionTeamName"] = trends_source_df["oppositionTeamName"].astype("string").fillna("Unknown")
+                            trends_source_df["opponent_label"] = (
+                                trends_source_df["matchDate"].dt.strftime("%b %d") + " - " + trends_source_df["oppositionTeamName"]
+                            )
+
+                            for key in metric_keys:
+                                if key not in trends_source_df.columns:
+                                    continue
+
+                                hover_cols = [c for c in metric_tooltip_fields.get(key, []) if c in trends_source_df.columns]
+                                chart_cols = ["opponent_label", "matchDate", key] + hover_cols
+                                chart_data = trends_source_df[chart_cols].dropna(subset=["opponent_label", "matchDate", key]).copy()
+                                if chart_data.empty:
+                                    continue
+
+                                reference_avg = compute_metric_average(reference_df, key)
+                                fig = px.bar(
+                                    chart_data,
+                                    x="opponent_label",
+                                    y=key,
+                                    title=metric_labels.get(key, key),
+                                    color_discrete_sequence=["#fcec03"],
+                                    hover_data=hover_cols,
+                                    labels={key: metric_labels.get(key, key)},
+                                    height=300,
+                                )
+                                fig.add_hline(
+                                    y=reference_avg,
+                                    line_dash="dash",
+                                    line_color="red",
+                                    annotation_text=f"Reference Avg: {reference_avg:.1f}",
+                                    annotation_position="top right",
+                                )
+                                fig.update_layout(
+                                    xaxis_title="Match",
+                                    yaxis_title=metric_labels.get(key, key),
+                                    showlegend=False,
+                                    xaxis_tickangle=-45,
+                                )
+                                trends_data_pdf.append({"kpi_name": metric_labels.get(key, key), "fig": fig})
+
+                        safe_name = _safe_pdf_filename(player_name)
+                        file_name = f"{safe_name}_player_report.pdf"
+
+                        with st.spinner("Generating PDF report..."):
+                            pdf_bytes = generate_player_report(
+                                player_name=player_name,
+                                player_info=player_info_payload,
+                                player_position=player_position,
+                                aggregated_metrics=aggregated_metrics,
+                                filtered_df=main_df,
+                                filters_data=filters_data,
+                                logo_path=LOGO_PATH,
+                                calculate_delta_func=calculate_delta,
+                                full_df=metrics_summary,
+                                reference_df=reference_df,
+                                position_kpi_map=position_kpi_map,
+                                trends_data=trends_data_pdf,
+                                comparison_data=None,
+                                comparison_kpi_table=None,
+                                comparison_charts=None,
+                                background_image_path=BACKGROUND_COVER_PATH if os.path.exists(BACKGROUND_COVER_PATH) else None,
+                            )
+
+                        if not pdf_bytes:
+                            raise ValueError("Generated PDF is empty.")
+
+                        st.session_state["player_report_pdf_bytes"] = pdf_bytes
+                        st.session_state["player_report_pdf_name"] = file_name
+                        st.success("PDF generated. Download should start automatically.")
+                    except Exception as e:
+                        st.session_state[auto_download_key] = False
+                        st.error(f"Failed to generate PDF: {e}")
+            finally:
+                st.session_state[generating_key] = False
+                overlay_placeholder.empty()
+
+        if st.session_state.get(auto_download_key, False) and st.session_state.get("player_report_pdf_bytes"):
+            pdf_b64 = base64.b64encode(st.session_state["player_report_pdf_bytes"]).decode("utf-8")
+            file_name = st.session_state.get("player_report_pdf_name", "player_report.pdf")
+            components.html(
+                f"""
+                <script>
+                  (function() {{
+                    const a = document.createElement('a');
+                    a.href = 'data:application/pdf;base64,{pdf_b64}';
+                    a.download = '{file_name}';
+                    a.style.display = 'none';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                  }})();
+                </script>
+                """,
+                height=0
+            )
+            st.session_state[auto_download_key] = False
+            st.caption("If download does not start automatically, use the fallback button below.")
+
+        if st.session_state.get("player_report_pdf_bytes"):
+            st.download_button(
+                "Download PDF report (fallback)",
+                data=st.session_state["player_report_pdf_bytes"],
+                file_name=st.session_state.get("player_report_pdf_name", "player_report.pdf"),
+                mime="application/pdf",
+                key="download_player_report_pdf",
+            )
 
     # --- Full Stats Table ---
-    display_df = filtered_df.copy()
+    display_df = selected_matches_df.copy()
+    display_df = display_df.drop(columns=["match_date_only", "is_main_period", "is_reference_period"], errors="ignore")
+    display_df = display_df.rename(columns={"period_tag": "Usage"})
 
     # Format KPI columns like the scorecards
     for col in selected_kpis:
@@ -1290,34 +1778,54 @@ elif section == "Trends Stats":
     # --- Match Filter ---
     with st.expander("Filter by Match (click to hide)", expanded=True):
         match_options = trends_df[["matchId", "opponent_label", "matchDate"]].drop_duplicates().sort_values("matchDate")
-        match_labels_dict = dict(zip(match_options["matchId"], match_options["opponent_label"]))
+        all_match_ids = list(match_options["matchId"])
+        state_key = "selected_match_ids_trends"
 
-        search_text = st.text_input("🔍 Search match:", "")
-        filtered_options = match_options[match_options["opponent_label"].str.contains(search_text, case=False, na=False)]
+        search_text = st.text_input("🔍 Search match:", "", key="match_search_trends")
+        filtered_options = match_options[
+            match_options["opponent_label"].str.contains(search_text, case=False, na=False)
+        ].copy()
+        visible_match_ids = list(filtered_options["matchId"])
+
+        if state_key not in st.session_state:
+            st.session_state[state_key] = all_match_ids
+        else:
+            st.session_state[state_key] = [mid for mid in st.session_state[state_key] if mid in all_match_ids]
 
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button("Select All Matches"):
-                st.session_state.selected_match_ids = list(filtered_options["matchId"])
+            if st.button("Select All Matches", key="select_all_matches_trends"):
+                st.session_state[state_key] = all_match_ids
+                for mid in all_match_ids:
+                    st.session_state[f"trends_match_{mid}"] = True
         with col2:
-            if st.button("Clear Matches"):
-                st.session_state.selected_match_ids = []
+            if st.button("Clear Matches", key="clear_matches_trends"):
+                st.session_state[state_key] = []
+                for mid in all_match_ids:
+                    st.session_state[f"trends_match_{mid}"] = False
 
-        selected_ids = st.session_state.get("selected_match_ids", list(filtered_options["matchId"]))
-        selected_match_ids = []
+        selected_ids = set(st.session_state[state_key])
+        selected_visible_ids = []
+        visible_set = set(visible_match_ids)
 
         st.markdown("<div style='max-height: 250px; overflow-y: auto; padding: 0 10px;'>", unsafe_allow_html=True)
         for _, row in filtered_options.iterrows():
-            checked = row["matchId"] in selected_ids
-            checkbox = st.checkbox(row["opponent_label"], value=checked, key=f"trends_match_{row['matchId']}")
-            if checkbox:
-                selected_match_ids.append(row["matchId"])
+            mid = row["matchId"]
+            label = row["opponent_label"]
+            cb_key = f"trends_match_{mid}"
+            if cb_key not in st.session_state:
+                st.session_state[cb_key] = mid in selected_ids
+            checked = st.checkbox(label, key=cb_key)
+            if checked:
+                selected_visible_ids.append(mid)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.session_state.selected_match_ids = selected_match_ids
+        hidden_selected = [mid for mid in st.session_state[state_key] if mid not in visible_set]
+        updated_set = set(hidden_selected) | set(selected_visible_ids)
+        st.session_state[state_key] = [mid for mid in all_match_ids if mid in updated_set]
 
     # Apply match filter (but don't re-create opponent_label!)
-    trends_df = trends_df[trends_df["matchId"].isin(st.session_state.selected_match_ids)]
+    trends_df = trends_df[trends_df["matchId"].isin(st.session_state.get("selected_match_ids_trends", []))]
 
     # --- Now Plot ---
     for key in metric_keys:
@@ -1853,7 +2361,7 @@ elif section == "Player Comparison":
     grouped = all_metrics_df.groupby("playerId")
     summary_metrics_df = grouped[["playerName","teamName"]].first().reset_index()
 
-    for kpi in position_kpi_map.get(player_position, []):
+    for kpi in selected_kpis:
         metric_type = metric_type_map.get(kpi, "aggregate")
         if metric_type == "percentage":
             numerator, denominator = percentage_formula_map.get(kpi, (None, None))
@@ -1887,7 +2395,7 @@ elif section == "Player Comparison":
     # --- Charts ---
     st.info("Comparison by KPI")
 
-    for kpi in position_kpi_map.get(player_position, []):
+    for kpi in selected_kpis:
         if kpi not in summary_metrics_df.columns:
             continue
 
@@ -1930,5 +2438,3 @@ elif section == "Player Comparison":
 
     st.expander("### Players Stats KPI Comparison")
     st.dataframe(summary_metrics_df, use_container_width=True)
-
-

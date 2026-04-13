@@ -5,6 +5,8 @@ from PIL import Image
 import base64
 from io import BytesIO
 from db_utils import connect_to_db, load_player_data  # Your db functions
+from player_ids import normalize_whoscored_player_id
+from utils.sheets_client import GoogleSheetsClient
 
 # --- Page settings ---
 import os
@@ -13,6 +15,7 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMG_DIR = os.path.join(BASE_DIR, 'img')
 LOGO_PATH = os.path.join(IMG_DIR, 'watford_logo.png')
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
 st.set_page_config(
     page_title="Watford Player Development Hub",
@@ -24,27 +27,61 @@ st.set_page_config(
 # Master password for Player login (can be overridden via env var)
 MASTER_PASSWORD = os.environ.get("PLAYER_MASTER_PASSWORD", "admin123")
 
-# --- Load Players from local CSV/XLSX for login (Players role) ---
+@st.cache_resource(show_spinner=False)
+def get_sheets_client() -> GoogleSheetsClient:
+    return GoogleSheetsClient()
+
+# --- Load Players from Google Sheets (fallback local CSV/XLSX) ---
 @st.cache_data(ttl=600)
 def load_players_for_login():
     """
-    Loads players from data/watford_players_login_info.[xlsx|csv]
+    Loads players from Google Sheets tab 'Players' (fallback local files)
     - Filters only activo == 1
-    - Normalizes columns: playerId (string), playerName (string), activo (int)
+    - Normalizes columns: internal_id (string), playerId (string), playerName (string), activo (int)
+    - Keeps only players that have WhoScored `playerId` for player login
     Returns a DataFrame with at least these columns.
     """
     try:
-        csv_path = os.path.join('data', 'watford_players_login_info.csv')
-        xlsx_path = os.path.join('data', 'watford_players_login_info.xlsx')
+        df = None
+        sheets_client = get_sheets_client()
+        if sheets_client.is_configured():
+            try:
+                df = sheets_client.read_players_df()
+            except Exception as exc:
+                st.warning(f"Could not read Players from Google Sheets. Falling back to local file. ({exc})")
 
-        if os.path.exists(csv_path):
-            df = pd.read_csv(csv_path, dtype={"playerId": "string"})
-        elif os.path.exists(xlsx_path):
-            # Keep playerId as string to preserve any leading zeros
-            df = pd.read_excel(xlsx_path, converters={"playerId": lambda x: str(x).strip() if pd.notna(x) else None})
-        else:
-            st.error("Players file not found in data/. Please add watford_players_login_info.xlsx or CSV.")
-            return pd.DataFrame(columns=["playerId", "playerName", "activo"]) 
+        if df is None:
+            candidate_paths = [
+                os.path.join(DATA_DIR, "watford_players_login_info.csv"),
+                os.path.join(DATA_DIR, "watford_players_login_info.xlsx"),
+                os.path.join(BASE_DIR, "watford_players_login_info.csv"),
+                os.path.join(BASE_DIR, "watford_players_login_info.xlsx"),
+                os.path.join("data", "watford_players_login_info.csv"),
+                os.path.join("data", "watford_players_login_info.xlsx"),
+                "watford_players_login_info.csv",
+                "watford_players_login_info.xlsx",
+            ]
+
+            existing = [p for p in candidate_paths if os.path.exists(p)]
+            if not existing:
+                st.error(
+                    "Players source not found. Configure Google Sheets (tab 'Players') "
+                    "or add watford_players_login_info.xlsx/CSV locally."
+                )
+                return pd.DataFrame(columns=["internal_id", "playerId", "playerName", "activo"])
+
+            file_path = existing[0]
+            if file_path.lower().endswith(".csv"):
+                df = pd.read_csv(file_path, dtype={"internal_id": "string", "playerId": "string"})
+            else:
+                # Keep playerId as string to preserve any leading zeros
+                df = pd.read_excel(
+                    file_path,
+                    converters={
+                        "internal_id": lambda x: str(x).strip() if pd.notna(x) else None,
+                        "playerId": lambda x: str(x).strip() if pd.notna(x) else None,
+                    },
+                )
 
         # Normalize columns
         df.columns = [str(c).strip() for c in df.columns]
@@ -52,7 +89,14 @@ def load_players_for_login():
         # Ensure required columns
         if 'playerName' not in df.columns:
             st.error("The players file requires a 'playerName' column.")
-            return pd.DataFrame(columns=["playerId", "playerName", "activo"]) 
+            return pd.DataFrame(columns=["internal_id", "playerId", "playerName", "activo"]) 
+
+        if 'internal_id' not in df.columns:
+            df['internal_id'] = None
+        else:
+            df['internal_id'] = df['internal_id'].astype('string')
+            df['internal_id'] = df['internal_id'].where(df['internal_id'].notna(), None)
+            df['internal_id'] = df['internal_id'].apply(lambda x: x.strip() if isinstance(x, str) else x)
 
         # activo: default to 1 if missing
         if 'activo' in df.columns:
@@ -65,6 +109,8 @@ def load_players_for_login():
             df['playerId'] = df['playerId'].astype('string')
             df['playerId'] = df['playerId'].where(df['playerId'].notna(), None)
             df['playerId'] = df['playerId'].apply(lambda x: x.strip() if isinstance(x, str) else x)
+            df["playerId"] = df["playerId"].apply(normalize_whoscored_player_id)
+            df["playerId"] = df["playerId"].astype("string").where(df["playerId"].notna(), None)
         else:
             df['playerId'] = None
 
@@ -74,19 +120,23 @@ def load_players_for_login():
         df['playerName'] = df['playerName'].astype(str).str.strip()
         # Drop rows without name
         df = df[df['playerName'] != ""]
+        # For player login, only players with a VALID WhoScored playerId are valid.
+        pid = df["playerId"].astype("string").where(df["playerId"].notna(), None)
+        df = df[pid.notna() & pid.str.fullmatch(r"\d+", na=False)].copy()
 
         return df
     except Exception as e:
-        st.error(f"Error loading players file: {e}")
-        return pd.DataFrame(columns=["playerId", "playerName", "activo"]) 
+        st.error(f"Error loading players source: {e}")
+        return pd.DataFrame(columns=["internal_id", "playerId", "playerName", "activo"]) 
 
 # --- Load Staff Users ---
 @st.cache_data(ttl=600)
 def load_staff_users():
-    if not os.path.exists('staff_users.csv'):
+    staff_users_path = os.path.join(BASE_DIR, "staff_users.csv")
+    if not os.path.exists(staff_users_path):
         # Create empty staff users file if it doesn't exist
-        pd.DataFrame(columns=['username', 'password', 'full_name', 'role']).to_csv('staff_users.csv', index=False)
-    return pd.read_csv('staff_users.csv')
+        pd.DataFrame(columns=['username', 'password', 'full_name', 'role']).to_csv(staff_users_path, index=False)
+    return pd.read_csv(staff_users_path)
 
 def validate_staff_login(username, password):
     staff_df = load_staff_users()
@@ -104,10 +154,6 @@ st.markdown("""
         div[data-testid="stSidebarNav"] {
             display: none !important;
         }
-        /* Requested UI tweak 
-        .st-emotion-cache-zy6yx3 {
-            padding: 0rem !important;
-        }*/
     </style>
 """, unsafe_allow_html=True)
 
@@ -123,10 +169,11 @@ def inject_sidebar_logo():
             div[data-testid="stSidebarHeader"] {{
                 background-image: url('data:image/png;base64,{b64}');
                 background-repeat: no-repeat;
-                background-position: center;
-                background-size: 90% auto;
-                min-height: 100px;
-                margin-bottom: 0.25rem;
+                background-position: center center;
+                background-size: contain;
+                min-height: 130px;
+                padding: 10px 8px 8px 8px;
+                margin-bottom: 0.4rem;
             }}
             </style>
         """, unsafe_allow_html=True)
@@ -134,6 +181,51 @@ def inject_sidebar_logo():
         pass
 
 inject_sidebar_logo()
+
+# Login page visual polish (UI only; no functional changes)
+st.markdown("""
+    <style>
+        section[data-testid="stSidebar"] {
+            border-right: 1px solid #d8d8d8;
+            background: #f0f2f6;
+        }
+
+        [data-testid="stAppViewContainer"] {
+            background: #f0f2f6;
+        }
+
+        .main .block-container {
+            max-width: 1180px;
+            padding-top: 2.2rem;
+        }
+
+        h1 {
+            letter-spacing: 0.2px;
+            font-weight: 800;
+            color: #1f2430;
+            margin-bottom: 0.3rem;
+        }
+
+        h3 {
+            color: #262b38;
+            margin-top: 0.6rem;
+        }
+
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border: 1px solid #d0d4da !important;
+            border-radius: 14px !important;
+            background: #ffffff;
+            box-shadow: 0 3px 12px rgba(15, 23, 42, 0.07);
+        }
+
+        div[data-testid="stSelectbox"] > div > div,
+        div[data-testid="stTextInput"] > div > div {
+            border-radius: 10px !important;
+            background-color: #ffffff !important;
+            border: 1px solid #cdd3db !important;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
 st.title("Watford Player Development")
 
@@ -159,7 +251,7 @@ if not st.session_state.logged_in:
         if role == "Player":
             players_df = load_players_for_login()
             if players_df.empty:
-                st.warning("No active players available. Please update data/watford_players_login_info.xlsx.")
+                st.warning("No active players with WhoScored ID available. Please update tab 'Players' in Google Sheets.")
             else:
                 name_to_id = {row['playerName']: row['playerId'] for _, row in players_df.iterrows()}
                 player_options = sorted(list(name_to_id.keys()), key=lambda s: s.lower())
