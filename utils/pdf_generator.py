@@ -315,37 +315,41 @@ class WatfordPlayerReport(FPDF):
             self.set_font('Arial', '', 11)
             self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
             
-            # Crear tabla de matches (2 columnas)
+            # Crear tabla de matches (2 columnas) con paginación automática
             col_width = 135
             row_height = 8
-            max_matches_to_show = 16  # keep filters page compact and avoid near-empty overflow page
-            
-            for i, match in enumerate(matches):
-                # Limitar a primeros partidos y resumir el resto
-                if i >= max_matches_to_show:
-                    self.set_font('Arial', 'I', 10)
-                    self.cell(0, 8, f'... and {len(matches) - max_matches_to_show} more matches', 0, 1, 'L')
-                    break
-                
-                # Alternar columnas
-                if i % 2 == 0:
-                    x_pos = self.get_x()
-                    y_pos = self.get_y()
-                
-                # Dibujar celda con borde (FONDO GRIS OSCURO)
+            page_break_y = 175
+            clean_matches = [str(m) for m in matches if str(m).strip()]
+
+            for idx in range(0, len(clean_matches), 2):
+                # Salto de página si no hay espacio para la siguiente fila
+                if self.get_y() + row_height > page_break_y:
+                    self.add_page()
+                    self.set_font('Arial', 'B', 20)
+                    self.set_text_color(*self.COLOR_WHITE)
+                    self.cell(0, 12, 'Filters Applied (continued)', 0, 1, 'L')
+                    self.ln(2)
+                    self.set_font('Arial', 'B', 14)
+                    self.set_text_color(*self.COLOR_WHITE)
+                    self.cell(0, 10, 'Selected Matches (continued):', 0, 1, 'L')
+                    self.ln(2)
+                    self.set_font('Arial', '', 11)
+                    self.set_text_color(*self.COLOR_WHITE)
+
+                x_pos = self.get_x()
+                y_pos = self.get_y()
+
+                # Primera columna
                 self.set_fill_color(60, 60, 60)  # ← GRIS OSCURO
-                self.cell(col_width, row_height, f'  {match}', 1, 0, 'L', True)
-                
-                if i % 2 == 0:
-                    # Primera columna
+                self.cell(col_width, row_height, f'  {clean_matches[idx]}', 1, 0, 'L', True)
+
+                # Segunda columna (si existe)
+                if idx + 1 < len(clean_matches):
                     self.set_xy(x_pos + col_width + 2, y_pos)
-                else:
-                    # Segunda columna
-                    self.ln()
-            
-            # Si terminó en columna 1, saltar línea
-            if len(matches) % 2 == 1:
-                self.ln()
+                    self.set_fill_color(60, 60, 60)
+                    self.cell(col_width, row_height, f'  {clean_matches[idx + 1]}', 1, 0, 'L', True)
+
+                self.set_xy(x_pos, y_pos + row_height)
         else:
             self.set_font('Arial', 'I', 12)
             self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
@@ -673,8 +677,9 @@ class WatfordPlayerReport(FPDF):
         charts_per_page = 2
         charts_on_current_page = 0
         max_content_y = 188  # Reserve bottom area so footer/page number is never covered.
-        desired_img_width = 270
-        desired_img_height = 58
+        # Keep enough height quality while allowing 2 charts per page consistently.
+        desired_img_width = 268
+        desired_img_height = 62
 
         def start_trends_page():
             self.add_page()
@@ -687,7 +692,7 @@ class WatfordPlayerReport(FPDF):
 
         for item in trends_data:
             # Hard cap per page + dynamic cap by available vertical space.
-            estimated_block_height = 6 + 1 + desired_img_height + 5
+            estimated_block_height = desired_img_height + 6
             if charts_on_current_page >= charts_per_page or (self.get_y() + estimated_block_height) > max_content_y:
                 start_trends_page()
                 charts_on_current_page = 0
@@ -697,30 +702,18 @@ class WatfordPlayerReport(FPDF):
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                     tmp_path = tmp.name
 
-                _write_plotly_png(item['fig'], tmp_path, width=1100, height=380, scale=1.0)
-
-                self.set_font('Arial', 'B', 10)
-                self.set_text_color(*self.COLOR_WHITE)
-                self.cell(0, 6, item['kpi_name'], 0, 1, 'L')
-                self.ln(1)
+                # Higher resolution + aspect ratio aligned with PDF slot.
+                _write_plotly_png(item['fig'], tmp_path, width=1400, height=324, scale=2.0)
 
                 y_top = self.get_y()
-                available_height = max_content_y - y_top
-                img_height = min(desired_img_height, available_height)
-
                 # If there is not enough room for a readable chart, move it to next page.
-                if img_height < 35:
+                if y_top + desired_img_height > max_content_y:
                     start_trends_page()
                     charts_on_current_page = 0
-                    self.set_font('Arial', 'B', 10)
-                    self.set_text_color(*self.COLOR_WHITE)
-                    self.cell(0, 6, item['kpi_name'], 0, 1, 'L')
-                    self.ln(1)
                     y_top = self.get_y()
-                    img_height = min(desired_img_height, max_content_y - y_top)
 
-                self.image(tmp_path, x=10, y=y_top, w=desired_img_width, h=img_height)
-                self.ln(img_height + 5)
+                self.image(tmp_path, x=10, y=y_top, w=desired_img_width, h=desired_img_height)
+                self.ln(desired_img_height + 6)
                 charts_on_current_page += 1
 
             except Exception as e:
@@ -884,21 +877,33 @@ class WatfordPlayerReport(FPDF):
             
             self.ln(5)
         
-        # ========== GRÁFICOS COMPARATIVOS (3 POR PÁGINA) ==========
+        # ========== GRÁFICOS COMPARATIVOS (2 POR PÁGINA) ==========
         if comparison_charts:
-            charts_per_page = 3  # ← CAMBIO
-            chart_count = 0
+            # Start charts on a clean page so we can reliably place 2 per page.
+            self.add_page()
+            self.set_font('Arial', 'B', 18)
+            self.set_text_color(*self.COLOR_WHITE)
+            self.cell(0, 12, 'Player Comparison Charts', 0, 1, 'L')
+            self.ln(3)
+
+            charts_per_page = 2
+            charts_on_current_page = 0
+            max_chart_y = 188
+            img_width = 268
+            img_height = 62
+            estimated_block_height = img_height + 6
             
             for item in comparison_charts:
-                # Nueva página si ya tenemos 3 gráficos (y no es el primero)
-                if chart_count > 0 and chart_count % charts_per_page == 0:
+                # Nueva página por límite de gráficos o espacio vertical disponible.
+                if charts_on_current_page >= charts_per_page or (self.get_y() + estimated_block_height) > max_chart_y:
                     self.add_page()
                     
                     # Re-imprimir título
                     self.set_font('Arial', 'B', 18)
                     self.set_text_color(*self.COLOR_WHITE)
-                    self.cell(0, 12, 'Player Comparison', 0, 1, 'L')
+                    self.cell(0, 12, 'Player Comparison Charts', 0, 1, 'L')
                     self.ln(3)
+                    charts_on_current_page = 0
                 
                 try:
                     # Guardar gráfico como imagen temporal
@@ -906,20 +911,10 @@ class WatfordPlayerReport(FPDF):
                         tmp_path = tmp.name
                     
                     # Convertir Plotly a imagen
-                    _write_plotly_png(item['fig'], tmp_path, width=1000, height=320, scale=1.0)
-                    
-                    # Título del gráfico
-                    self.set_font('Arial', 'B', 10)
-                    self.set_text_color(*self.COLOR_WHITE)
-                    self.cell(0, 6, item['kpi_name'], 0, 1, 'L')
-                    self.ln(1)
-                    
-                    # Insertar imagen (ajustado para 3)
-                    img_width = 270
-                    img_height = 58
+                    _write_plotly_png(item['fig'], tmp_path, width=1400, height=324, scale=2.0)
                     
                     self.image(tmp_path, x=10, y=self.get_y(), w=img_width, h=img_height)
-                    self.ln(img_height + 4)
+                    self.ln(img_height + 6)
                     
                     # Eliminar archivo temporal
                     try:
@@ -927,7 +922,7 @@ class WatfordPlayerReport(FPDF):
                     except:
                         pass
                         
-                    chart_count += 1
+                    charts_on_current_page += 1
                     
                 except Exception as e:
                     print(f"Error adding comparison chart: {e}")

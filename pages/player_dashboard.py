@@ -1737,8 +1737,11 @@ if section == "Overview Stats":
                                     xaxis_title="Match",
                                     yaxis_title=metric_labels.get(key, key),
                                     showlegend=False,
-                                    xaxis_tickangle=-45,
+                                    xaxis_tickangle=-35,
+                                    margin=dict(l=55, r=25, t=55, b=115),
                                 )
+                                fig.update_xaxes(automargin=True)
+                                fig.update_yaxes(automargin=True)
                                 trends_data_pdf.append({"kpi_name": metric_labels.get(key, key), "fig": fig})
 
                         safe_name = _safe_pdf_filename(player_name)
