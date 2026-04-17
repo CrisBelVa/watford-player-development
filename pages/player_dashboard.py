@@ -25,6 +25,7 @@ from utils.pdf_cover_photos import (
     migrate_cover_photo_from_path,
     save_cover_photo,
 )
+from utils.player_focus_cards import render_player_focus_section
 
 # Optional: helper to navigate between pages
 try:
@@ -136,6 +137,8 @@ if "logged_in" not in st.session_state or not st.session_state.logged_in:
 
 # Determine user type
 is_staff = st.session_state.user_type == "staff"
+staff_role = str(st.session_state.get("staff_info", {}).get("role", "")).strip().lower()
+is_admin_staff = bool(is_staff and staff_role in {"admin", "administrator"})
 
 # =============================================================
 # === GLOBAL DOWNLOAD PDF BUTTON (visible for staff & players) ===
@@ -1313,7 +1316,7 @@ metric_keys = selected_kpis
 st.sidebar.header("Select Visualization")
 section = st.sidebar.radio(
     "Go to section:",
-    options=["Overview Stats", "Trends Stats", "Player Comparison"],
+    options=["Overview Stats", "Trends Stats", "Player Card", "Player Comparison"],
     index=0,
     key="selected_section"
 )
@@ -2241,6 +2244,26 @@ elif section == "Trends Stats":
         )
             
         st.plotly_chart(fig, use_container_width=True)
+
+
+elif section == "Player Card":
+    render_player_focus_section(
+        player_id=str(player_id),
+        player_name=str(player_name),
+        is_admin=is_admin_staff,
+        staff_display_name=str(
+            st.session_state.get("staff_info", {}).get("full_name", "Admin")
+        ),
+        all_kpi_options=all_kpi_options,
+        selected_kpis=selected_kpis,
+        metric_labels=metric_labels,
+        metric_type_map=metric_type_map,
+        filtered_df=filtered_df,
+        event_data=event_data,
+        attach_minutes_reference=attach_minutes_reference,
+        sheets_client=get_sheets_client(),
+        base_dir=BASE_DIR,
+    )
 
 
 # -----------------------------
