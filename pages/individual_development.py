@@ -542,9 +542,13 @@ with st.sidebar:
       
 
     # Navegación
+    section_options = ["General Dashboard", "Players Profile", "Files"]
+    if "individual_dev_section" not in st.session_state:
+        st.session_state["individual_dev_section"] = "Players Profile"
     page = st.radio(
         "Select a section:",
-        ["General Dashboard", "Players Profile", "Files"],
+        section_options,
+        key="individual_dev_section",
         label_visibility="collapsed"
     )
     
@@ -1063,7 +1067,13 @@ elif page == "Players Profile":
 
                 # Botón para exportar las activities filtradas a Excel
                 buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+                excel_engine = "xlsxwriter"
+                try:
+                    import xlsxwriter  # noqa: F401
+                except ModuleNotFoundError:
+                    excel_engine = "openpyxl"
+
+                with pd.ExcelWriter(buffer, engine=excel_engine) as writer:
                     df_mostrar.to_excel(writer, index=False, sheet_name="Activities")
 
                 buffer.seek(0)
@@ -1166,57 +1176,58 @@ elif page == "Players Profile":
         st.session_state.pop("individual_profile_pdf_name", None)
 
     if df_pdf_activities.empty:
-        st.info("No activities in the current range/filters to generate PDF.")
-    else:
-        generating_key = "individual_profile_pdf_generating"
-        auto_download_key = "individual_profile_pdf_auto_download_pending"
-        if generating_key not in st.session_state:
-            st.session_state[generating_key] = False
-        if auto_download_key not in st.session_state:
-            st.session_state[auto_download_key] = False
+        st.info("No activities in the current range/filters. You can still generate the PDF report.")
 
-        if st.button(
-            "Generate & Download PDF report",
-            key="generate_individual_profile_pdf",
-            type="primary",
-            disabled=st.session_state.get(generating_key, False),
-        ):
-            st.session_state[generating_key] = True
-            st.session_state[auto_download_key] = True
-            st.rerun()
+    generating_key = "individual_profile_pdf_generating"
+    auto_download_key = "individual_profile_pdf_auto_download_pending"
+    if generating_key not in st.session_state:
+        st.session_state[generating_key] = False
+    if auto_download_key not in st.session_state:
+        st.session_state[auto_download_key] = False
 
-        if st.session_state.get(generating_key, False):
-            overlay_placeholder = st.empty()
-            overlay_placeholder.markdown(
-                """
-                <style>
-                  .pdf-generation-overlay {
-                    position: fixed;
-                    inset: 0;
-                    background: rgba(0, 0, 0, 0.45);
-                    z-index: 2147483000;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    pointer-events: all;
-                  }
-                  .pdf-generation-overlay-card {
-                    background: #111;
-                    color: #fff;
-                    padding: 1rem 1.25rem;
-                    border-radius: 12px;
-                    font-weight: 600;
-                    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-                  }
-                </style>
-                <div class="pdf-generation-overlay">
-                  <div class="pdf-generation-overlay-card">Generating PDF report... Please wait.</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    if st.button(
+        "Generate & Download PDF report",
+        key="generate_individual_profile_pdf",
+        type="primary",
+        disabled=st.session_state.get(generating_key, False),
+    ):
+        st.session_state[generating_key] = True
+        st.session_state[auto_download_key] = True
+        st.rerun()
+
+    if st.session_state.get(generating_key, False):
+        overlay_placeholder = st.empty()
+        overlay_placeholder.markdown(
+            """
+            <style>
+              .pdf-generation-overlay {
+                position: fixed;
+                inset: 0;
+                background: rgba(0, 0, 0, 0.45);
+                z-index: 2147483000;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                pointer-events: all;
+              }
+              .pdf-generation-overlay-card {
+                background: #111;
+                color: #fff;
+                padding: 1rem 1.25rem;
+                border-radius: 12px;
+                font-weight: 600;
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+              }
+            </style>
+            <div class="pdf-generation-overlay">
+              <div class="pdf-generation-overlay-card">Generating PDF report... Please wait.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        try:
             try:
-                try:
+                if not df_pdf_activities.empty and "tipo" in df_pdf_activities.columns:
                     df_summary_pdf = (
                         df_pdf_activities
                         .groupby("tipo", dropna=False)
@@ -1224,70 +1235,71 @@ elif page == "Players Profile":
                         .reset_index(name="count")
                     )
                     df_summary_pdf["tipo"] = df_summary_pdf["tipo"].fillna("No type")
+                else:
+                    df_summary_pdf = pd.DataFrame(columns=["tipo", "count"])
 
-                    safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(jugador_info).strip())
-                    safe_name = safe_name.strip("_") or "player"
-                    pdf_file_name = f"{safe_name}_individual_development.pdf"
+                safe_name = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(jugador_info).strip())
+                safe_name = safe_name.strip("_") or "player"
+                pdf_file_name = f"{safe_name}_individual_development.pdf"
 
-                    with st.spinner("Generating PDF report..."):
-                        pdf_bytes = generate_individual_development_report_landscape(
-                            player_name=jugador_info,
-                            fecha_inicio=fecha_inicio.strftime("%Y-%m-%d"),
-                            fecha_fin=fecha_fin.strftime("%Y-%m-%d"),
-                            df_activities=df_pdf_activities,
-                            df_summary=df_summary_pdf,
-                            df_ratings=None,
-                            fig_comparison=pdf_comparison_fig,
-                            fig_timeline=pdf_timeline_fig,
-                            logo_path=LOGO_PATH,
-                            background_image_path=BACKGROUND_COVER_PATH if os.path.exists(BACKGROUND_COVER_PATH) else None,
-                            player_photo_path=selected_cover_photo_path if (selected_cover_photo_path and os.path.exists(selected_cover_photo_path)) else None,
-                            cover_only=True,
-                        )
+                with st.spinner("Generating PDF report..."):
+                    pdf_bytes = generate_individual_development_report_landscape(
+                        player_name=jugador_info,
+                        fecha_inicio=fecha_inicio.strftime("%Y-%m-%d"),
+                        fecha_fin=fecha_fin.strftime("%Y-%m-%d"),
+                        df_activities=df_pdf_activities,
+                        df_summary=df_summary_pdf,
+                        df_ratings=None,
+                        fig_comparison=pdf_comparison_fig,
+                        fig_timeline=pdf_timeline_fig,
+                        logo_path=LOGO_PATH,
+                        background_image_path=BACKGROUND_COVER_PATH if os.path.exists(BACKGROUND_COVER_PATH) else None,
+                        player_photo_path=selected_cover_photo_path if (selected_cover_photo_path and os.path.exists(selected_cover_photo_path)) else None,
+                    )
 
-                    if not pdf_bytes:
-                        raise ValueError("Generated PDF is empty.")
+                if not pdf_bytes:
+                    raise ValueError("Generated PDF is empty.")
 
-                    st.session_state["individual_profile_pdf_bytes"] = pdf_bytes
-                    st.session_state["individual_profile_pdf_name"] = pdf_file_name
-                    st.success("PDF generated. Download should start automatically.")
-                except Exception as e:
-                    st.session_state[auto_download_key] = False
-                    st.error(f"Failed to generate PDF report: {e}")
-            finally:
-                st.session_state[generating_key] = False
-                overlay_placeholder.empty()
+                st.session_state["individual_profile_pdf_bytes"] = pdf_bytes
+                st.session_state["individual_profile_pdf_name"] = pdf_file_name
+                st.success("PDF generated. Download should start automatically.")
+            except Exception as e:
+                st.session_state[auto_download_key] = False
+                st.error(f"Failed to generate PDF report: {e}")
+        finally:
+            st.session_state[generating_key] = False
+            overlay_placeholder.empty()
 
-        if st.session_state.get(auto_download_key, False) and st.session_state.get("individual_profile_pdf_bytes"):
-            pdf_b64 = base64.b64encode(st.session_state["individual_profile_pdf_bytes"]).decode("utf-8")
-            file_name = st.session_state.get("individual_profile_pdf_name", "individual_development_report.pdf")
-            components.html(
-                f"""
-                <script>
-                  (function() {{
-                    const a = document.createElement('a');
-                    a.href = 'data:application/pdf;base64,{pdf_b64}';
-                    a.download = '{file_name}';
-                    a.style.display = 'none';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                  }})();
-                </script>
-                """,
-                height=0,
-            )
-            st.session_state[auto_download_key] = False
-            st.caption("If download does not start automatically, use the fallback button below.")
+    if st.session_state.get(auto_download_key, False) and st.session_state.get("individual_profile_pdf_bytes"):
+        pdf_b64 = base64.b64encode(st.session_state["individual_profile_pdf_bytes"]).decode("utf-8")
+        file_name = st.session_state.get("individual_profile_pdf_name", "individual_development_report.pdf")
+        components.html(
+            f"""
+            <script>
+              (function() {{
+                const a = document.createElement('a');
+                a.href = 'data:application/pdf;base64,{pdf_b64}';
+                a.download = '{file_name}';
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+              }})();
+            </script>
+            """,
+            height=0,
+        )
+        st.session_state[auto_download_key] = False
+        st.caption("If download does not start automatically, use the fallback button below.")
 
-        if st.session_state.get("individual_profile_pdf_bytes"):
-            st.download_button(
-                "Download PDF report (fallback)",
-                data=st.session_state["individual_profile_pdf_bytes"],
-                file_name=st.session_state.get("individual_profile_pdf_name", "individual_development_report.pdf"),
-                mime="application/pdf",
-                key="download_individual_profile_pdf",
-            )
+    if st.session_state.get("individual_profile_pdf_bytes"):
+        st.download_button(
+            "Download PDF report (fallback)",
+            data=st.session_state["individual_profile_pdf_bytes"],
+            file_name=st.session_state.get("individual_profile_pdf_name", "individual_development_report.pdf"),
+            mime="application/pdf",
+            key="download_individual_profile_pdf",
+        )
             
 
 # 3. Registro de Activities
