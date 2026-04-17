@@ -12,7 +12,13 @@ import io
 import streamlit.components.v1 as components
 from utils.pdf_generator import generate_individual_development_report_landscape
 from utils.sheets_client import GoogleSheetsClient
-from utils.pdf_cover_photos import list_cover_photos, save_cover_photo
+from db_utils import connect_to_db
+from utils.pdf_cover_photos import (
+    build_cover_player_key,
+    list_cover_photos,
+    migrate_cover_photo_from_path,
+    save_cover_photo,
+)
 
 
 # --- Configuración de página ---
@@ -265,6 +271,229 @@ def _append_training_session_row(
 
     updated_df = pd.concat([raw_df, pd.DataFrame([new_row])], ignore_index=True)
     return _save_sessions_raw_df(updated_df)
+
+
+def _normalize_player_name_key(value: object) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().lower().split())
+
+
+def _normalize_player_id(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return None
+    # Excel often stores integer ids as float-looking strings (e.g. "363139.0").
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text if text else None
+
+
+def _format_position_label(value: object) -> str | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    code_map = {
+        "GK": "Goalkeeper",
+        "DC": "Center Back",
+        "DL": "Left Back",
+        "DR": "Right Back",
+        "DMC": "Defensive Midfielder",
+        "DM": "Defensive Midfielder",
+        "MC": "Midfielder",
+        "ML": "Left Midfielder",
+        "MR": "Right Midfielder",
+        "AMC": "Attacking Midfielder",
+        "AML": "Left Winger",
+        "AMR": "Right Winger",
+        "FW": "Striker",
+        "FWL": "Left Winger",
+        "FWR": "Right Winger",
+        "DML": "Left Back",
+        "DMR": "Right Back",
+    }
+    upper_raw = raw.upper()
+    if upper_raw in code_map:
+        return code_map[upper_raw]
+
+    if raw.isupper() and len(raw) <= 4:
+        return raw
+    return raw
+
+
+@st.cache_data(ttl=3600)
+def load_players_metadata() -> pd.DataFrame:
+    """Load Players metadata (name/id/internal_position) from Sheets or local fallback."""
+    players_df = None
+    sheets_client = get_sheets_client()
+    if sheets_client.is_configured():
+        try:
+            players_df = sheets_client.read_players_df()
+        except Exception:
+            players_df = None
+
+    if players_df is None or players_df.empty:
+        local_candidates = [
+            Path(BASE_DIR) / "data" / "watford_players_login_info.xlsx",
+            Path(BASE_DIR) / "watford_players_login_info.xlsx",
+        ]
+        for candidate in local_candidates:
+            if candidate.exists():
+                try:
+                    players_df = pd.read_excel(candidate)
+                    break
+                except Exception:
+                    continue
+
+    if players_df is None or players_df.empty:
+        return pd.DataFrame(columns=["playerName", "playerId", "internal_position"])
+
+    players_df = players_df.copy()
+    players_df.columns = [str(c).strip() for c in players_df.columns]
+    if "playerName" not in players_df.columns:
+        return pd.DataFrame(columns=["playerName", "playerId", "internal_position"])
+    if "playerId" not in players_df.columns:
+        players_df["playerId"] = None
+    if "internal_position" not in players_df.columns:
+        players_df["internal_position"] = None
+
+    out = players_df[["playerName", "playerId", "internal_position"]].copy()
+    out["playerName"] = out["playerName"].astype("string").str.strip()
+    out["playerNameKey"] = out["playerName"].apply(_normalize_player_name_key)
+    out["playerId"] = out["playerId"].astype("string").where(out["playerId"].notna(), None)
+    out["playerId"] = out["playerId"].apply(_normalize_player_id)
+    out["internal_position"] = out["internal_position"].apply(_format_position_label)
+    return out
+
+
+@st.cache_data(ttl=3600)
+def load_whoscored_cover_data(player_id: str | None, player_name: str | None) -> tuple[str | None, int | None]:
+    """
+    Return (position, age) prioritizing WhoScored data in player_data.
+    - Position: most frequent non-'Sub' position, tie-broken by latest matchId.
+    - Age: latest available age value.
+    """
+    pid = _normalize_player_id(player_id)
+    name = str(player_name).strip() if player_name else ""
+    if not pid and not name:
+        return None, None
+
+    position_value: str | None = None
+    age_value: int | None = None
+    engine = connect_to_db()
+
+    def _query_by_pid(pid_value: str):
+        nonlocal position_value, age_value
+        pid_param = int(pid_value) if pid_value.isdigit() else pid_value
+
+        pos_query = """
+            SELECT position, COUNT(*) AS cnt, MAX(matchId) AS last_match
+            FROM player_data
+            WHERE playerId = %s
+              AND position IS NOT NULL
+              AND TRIM(position) <> ''
+              AND position <> 'Sub'
+            GROUP BY position
+            ORDER BY cnt DESC, last_match DESC
+            LIMIT 1
+        """
+        pos_df = pd.read_sql(pos_query, con=engine, params=(pid_param,))
+        if not pos_df.empty and "position" in pos_df.columns:
+            position_value = _format_position_label(pos_df.iloc[0]["position"])
+
+        age_query = """
+            SELECT age
+            FROM player_data
+            WHERE playerId = %s
+              AND age IS NOT NULL
+            ORDER BY matchId DESC
+            LIMIT 1
+        """
+        age_df = pd.read_sql(age_query, con=engine, params=(pid_param,))
+        if not age_df.empty and "age" in age_df.columns:
+            age_series = pd.to_numeric(age_df["age"], errors="coerce").dropna()
+            if not age_series.empty:
+                age_value = int(round(float(age_series.iloc[0])))
+
+    def _query_by_name(player_name_value: str):
+        nonlocal position_value, age_value
+        name_param = player_name_value.strip().lower()
+        if not name_param:
+            return
+
+        pos_query = """
+            SELECT position, COUNT(*) AS cnt, MAX(matchId) AS last_match
+            FROM player_data
+            WHERE LOWER(playerName) = %s
+              AND position IS NOT NULL
+              AND TRIM(position) <> ''
+              AND position <> 'Sub'
+            GROUP BY position
+            ORDER BY cnt DESC, last_match DESC
+            LIMIT 1
+        """
+        pos_df = pd.read_sql(pos_query, con=engine, params=(name_param,))
+        if not pos_df.empty and "position" in pos_df.columns:
+            position_value = _format_position_label(pos_df.iloc[0]["position"])
+
+        age_query = """
+            SELECT age
+            FROM player_data
+            WHERE LOWER(playerName) = %s
+              AND age IS NOT NULL
+            ORDER BY matchId DESC
+            LIMIT 1
+        """
+        age_df = pd.read_sql(age_query, con=engine, params=(name_param,))
+        if not age_df.empty and "age" in age_df.columns:
+            age_series = pd.to_numeric(age_df["age"], errors="coerce").dropna()
+            if not age_series.empty:
+                age_value = int(round(float(age_series.iloc[0])))
+
+    try:
+        # 1) Prefer playerId from WhoScored mapping.
+        if pid:
+            _query_by_pid(pid)
+
+        # 2) If any value is still missing, fallback by exact player name.
+        if name and (position_value is None or age_value is None):
+            _query_by_name(name)
+    except Exception:
+        return None, None
+
+    return position_value, age_value
+
+
+def get_player_cover_metadata(player_name: str) -> tuple[str | None, int | None]:
+    """Return (position_label, age_years) prioritizing WhoScored data."""
+    players_meta = load_players_metadata()
+
+    target_key = _normalize_player_name_key(player_name)
+    if not target_key and players_meta.empty:
+        return None, None
+
+    internal_position: str | None = None
+    player_id: str | None = None
+    if not players_meta.empty:
+        matches = players_meta[players_meta["playerNameKey"] == target_key]
+        if matches.empty and target_key:
+            contains_mask = players_meta["playerNameKey"].astype(str).str.contains(target_key, regex=False)
+            matches = players_meta[contains_mask]
+        if not matches.empty:
+            row = matches.iloc[0]
+            internal_position = row.get("internal_position")
+            player_id = _normalize_player_id(row.get("playerId"))
+
+    whoscored_position, whoscored_age = load_whoscored_cover_data(player_id, player_name)
+
+    # WhoScored position first; internal_position only as fallback.
+    position = whoscored_position or internal_position
+    return position, whoscored_age
 
 # --- Estilos CSS personalizados ---
 st.markdown("""
@@ -912,6 +1141,7 @@ elif page == "Players Profile":
             index=0
         )
         jugador_seleccionado = jugadores[jugador_id]
+        cover_position, cover_age = get_player_cover_metadata(jugador_seleccionado)
 
     # Selector para comparar jugadores
     with st.expander("Compare with other players", expanded=False):
@@ -934,9 +1164,12 @@ elif page == "Players Profile":
     df_all = load_training_data()
 
     # Combine main player and comparison players
-    all_selected_players = [jugador_seleccionado] + [
-        p for p in jugadores_comparar if p != jugador_seleccionado
-    ]
+    comparison_players = [p for p in jugadores_comparar if p != jugador_seleccionado]
+    has_comparison_players = len(comparison_players) > 0
+    all_selected_players = [jugador_seleccionado] + comparison_players
+
+    # X-axis labels should stay horizontal when there is no comparison player.
+    x_tick_angle = -18 if has_comparison_players else 0
 
     # Filter by selected players and date range
     df_filtered = df_all[
@@ -1013,8 +1246,10 @@ elif page == "Players Profile":
         yaxis_title="Activity Count",
         legend_title="Type",
         plot_bgcolor="white",
+        paper_bgcolor="white",
         title="Activities by Player",
-        margin=dict(l=20, r=20, t=40, b=20),
+        height=420,
+        margin=dict(l=95, r=30, t=70, b=95),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -1022,6 +1257,23 @@ elif page == "Players Profile":
             xanchor="right",
             x=1
         )
+    )
+    comparison_fig.update_xaxes(
+        automargin=True,
+        tickangle=x_tick_angle,
+        title_standoff=18,
+        tickfont=dict(size=11),
+        showline=True,
+        linecolor="#A3A8B0",
+        mirror=False,
+    )
+    comparison_fig.update_yaxes(
+        automargin=True,
+        title_standoff=18,
+        rangemode="tozero",
+        showline=True,
+        linecolor="#A3A8B0",
+        gridcolor="#DFE4EA",
     )
 
     st.plotly_chart(comparison_fig, use_container_width=True)
@@ -1121,13 +1373,37 @@ elif page == "Players Profile":
             )
             
             timeline_fig.update_layout(
-                plot_bgcolor='rgba(0,0,0,0)',
-                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='white',
+                paper_bgcolor='white',
                 xaxis_title='Date',
                 yaxis_title='',
                 showlegend=True,
                 legend_title='Activity Type',
-                margin=dict(l=0, r=0, t=40, b=0)
+                height=420,
+                margin=dict(l=85, r=35, t=70, b=95),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                ),
+            )
+            timeline_fig.update_xaxes(
+                automargin=True,
+                title_standoff=20,
+                tickformat="%d/%m/%Y",
+                tickfont=dict(size=10),
+                showline=True,
+                linecolor="#A3A8B0",
+                gridcolor="#E1E5EA",
+            )
+            timeline_fig.update_yaxes(
+                automargin=True,
+                tickfont=dict(size=11),
+                showline=True,
+                linecolor="#A3A8B0",
+                gridcolor="#E1E5EA",
             )
             
             st.plotly_chart(timeline_fig, use_container_width=True)
@@ -1140,10 +1416,30 @@ elif page == "Players Profile":
     st.markdown("---")
     st.subheader("PDF Report")
 
-    cover_player_key = f"individual_{jugador_id}_{jugador_seleccionado}"
+    cover_player_key = build_cover_player_key(player_name=jugador_seleccionado, player_id=jugador_id)
     cover_session_key = f"individual_profile_cover_photo_path_{jugador_id}"
     if cover_session_key not in st.session_state:
         history = list_cover_photos(base_dir=BASE_DIR, player_key=cover_player_key)
+        if not history:
+            legacy_keys = [
+                f"individual_{jugador_id}_{jugador_seleccionado}",
+                f"{jugador_id}_{jugador_seleccionado}",
+            ]
+            for legacy_key in legacy_keys:
+                if legacy_key == cover_player_key:
+                    continue
+                legacy_history = list_cover_photos(base_dir=BASE_DIR, player_key=legacy_key)
+                if legacy_history:
+                    try:
+                        migrate_cover_photo_from_path(
+                            image_path=legacy_history[0]["path"],
+                            base_dir=BASE_DIR,
+                            player_key=cover_player_key,
+                        )
+                        history = list_cover_photos(base_dir=BASE_DIR, player_key=cover_player_key)
+                    except Exception:
+                        history = legacy_history
+                    break
         st.session_state[cover_session_key] = history[0]["path"] if history else None
 
     if st.button("Manage player cover photo", key="manage_individual_profile_cover_photo"):
@@ -1255,6 +1551,8 @@ elif page == "Players Profile":
                         logo_path=LOGO_PATH,
                         background_image_path=BACKGROUND_COVER_PATH if os.path.exists(BACKGROUND_COVER_PATH) else None,
                         player_photo_path=selected_cover_photo_path if (selected_cover_photo_path and os.path.exists(selected_cover_photo_path)) else None,
+                        player_position=cover_position,
+                        player_age=cover_age,
                     )
 
                 if not pdf_bytes:

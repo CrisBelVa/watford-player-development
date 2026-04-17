@@ -24,6 +24,18 @@ def _player_cover_dir(base_dir: str, player_key: str) -> Path:
     return player_dir
 
 
+def build_cover_player_key(player_name: str | None = None, player_id: Any | None = None) -> str:
+    """
+    Shared cover key used across different PDF modules/pages.
+    Prefer name so Player Dashboard and Individual Development resolve to the same folder.
+    """
+    if isinstance(player_name, str) and player_name.strip():
+        return player_name.strip()
+    if player_id is not None:
+        return f"player-{player_id}"
+    return "player"
+
+
 def list_cover_photos(base_dir: str, player_key: str) -> list[dict[str, Any]]:
     player_dir = _player_cover_dir(base_dir, player_key)
     files = [
@@ -58,6 +70,12 @@ def save_cover_photo(
     output_path = player_dir / f"{timestamp}.jpg"
 
     image = Image.open(uploaded_file)
+    image = _normalize_cover_image(image=image, max_side_px=max_side_px)
+    image.save(output_path, format="JPEG", quality=88, optimize=True, progressive=True)
+    return str(output_path.resolve())
+
+
+def _normalize_cover_image(image: Image.Image, max_side_px: int = 900) -> Image.Image:
     image = ImageOps.exif_transpose(image)
     image = image.convert("RGB")
 
@@ -71,5 +89,23 @@ def save_cover_photo(
     if image.width > max_side_px:
         image = image.resize((max_side_px, max_side_px), Image.Resampling.LANCZOS)
 
+    return image
+
+
+def migrate_cover_photo_from_path(
+    image_path: str,
+    base_dir: str,
+    player_key: str,
+    max_side_px: int = 900,
+) -> str:
+    """
+    Import an existing image file into the shared cover-photo history for player_key.
+    """
+    player_dir = _player_cover_dir(base_dir, player_key)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    output_path = player_dir / f"{timestamp}.jpg"
+
+    image = Image.open(image_path)
+    image = _normalize_cover_image(image=image, max_side_px=max_side_px)
     image.save(output_path, format="JPEG", quality=88, optimize=True, progressive=True)
     return str(output_path.resolve())

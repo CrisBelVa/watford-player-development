@@ -19,7 +19,12 @@ from pandas.io.formats.style import Styler
 import streamlit.components.v1 as components  # ✅ needed for working HTML injection
 from player_ids import normalize_whoscored_player_id, whoscored_player_url
 from utils.sheets_client import GoogleSheetsClient
-from utils.pdf_cover_photos import list_cover_photos, save_cover_photo
+from utils.pdf_cover_photos import (
+    build_cover_player_key,
+    list_cover_photos,
+    migrate_cover_photo_from_path,
+    save_cover_photo,
+)
 
 # Optional: helper to navigate between pages
 try:
@@ -846,8 +851,25 @@ def add_match_dates(df: pd.DataFrame, match_data_df: pd.DataFrame):
 
 # ---- DELTAS ----
 
-def compute_metric_average(df: pd.DataFrame, column: str) -> float:
-    """Compute metric value per period (percentage from weighted ratios, others per match)."""
+def _period_total_minutes(df: pd.DataFrame) -> float:
+    """Resolve total minutes for period-level normalizations."""
+    for minutes_col in ("minutesPlayed", "minutes_reference"):
+        if minutes_col in df.columns:
+            minutes_series = pd.to_numeric(df[minutes_col], errors="coerce").fillna(0.0)
+            total_minutes = float(minutes_series.sum())
+            if total_minutes > 0:
+                return total_minutes
+
+    match_count = int(df["matchId"].nunique()) if "matchId" in df.columns else len(df)
+    return float(max(1, match_count) * 90.0)
+
+
+def compute_metric_average(
+    df: pd.DataFrame,
+    column: str,
+    use_per90_for_non_pct: bool = False,
+) -> float:
+    """Compute metric value per period (% from weighted ratios; non-% optionally per 90)."""
     if df.empty:
         return 0.0
 
@@ -867,18 +889,36 @@ def compute_metric_average(df: pd.DataFrame, column: str) -> float:
         mean_val = series.mean()
         return 0.0 if pd.isna(mean_val) else float(mean_val)
 
-    return float(series.fillna(0).sum() / max(1, len(df)))
+    total_value = float(series.fillna(0).sum())
+    if use_per90_for_non_pct:
+        total_minutes = _period_total_minutes(df)
+        return (total_value / total_minutes) * 90.0 if total_minutes > 0 else 0.0
+
+    return float(total_value / max(1, len(df)))
 
 
-def calculate_delta(delta_df: pd.DataFrame, reference_df: pd.DataFrame, column: str) -> Tuple[float, float]:
+def calculate_delta(
+    delta_df: pd.DataFrame,
+    reference_df: pd.DataFrame,
+    column: str,
+    use_per90_for_non_pct: bool = False,
+) -> Tuple[float, float]:
     """
     Calculates delta between Delta window and Reference window for one metric.
     """
     if delta_df.empty or reference_df.empty:
         return 0.0, 0.0
 
-    delta_value = compute_metric_average(delta_df, column)
-    reference_value = compute_metric_average(reference_df, column)
+    delta_value = compute_metric_average(
+        delta_df,
+        column,
+        use_per90_for_non_pct=use_per90_for_non_pct,
+    )
+    reference_value = compute_metric_average(
+        reference_df,
+        column,
+        use_per90_for_non_pct=use_per90_for_non_pct,
+    )
 
     delta = delta_value - reference_value
     delta_percent = (delta / reference_value * 100) if reference_value != 0 else 0
@@ -887,7 +927,7 @@ def calculate_delta(delta_df: pd.DataFrame, reference_df: pd.DataFrame, column: 
 
 # ---- METRIC CARD ----
 
-def format_metric_value(value, column):
+def format_metric_value(value, column, use_per90_for_non_pct: bool = False):
     """
     Formats a metric value based on its type:
     - Percentages: one decimal
@@ -901,19 +941,39 @@ def format_metric_value(value, column):
         return f"{value:.1f}"
     elif column in ["xG", "xA", "ps_xG", "progressive_passes", "progressive_carry_distance"]:
         return f"{value:.2f}"
+    elif use_per90_for_non_pct:
+        return f"{value:.2f}"
     else:
         return f"{int(round(value))}"
 
 
-def display_metric_card(col, title, value, delta_df, reference_df, column, color=None):
+def display_metric_card(
+    col,
+    title,
+    value,
+    delta_df,
+    reference_df,
+    column,
+    color=None,
+    use_per90_for_non_pct: bool = False,
+):
     with col:
         with st.container(border=True):
-            delta, delta_percent = calculate_delta(delta_df, reference_df, column)
+            delta, delta_percent = calculate_delta(
+                delta_df,
+                reference_df,
+                column,
+                use_per90_for_non_pct=use_per90_for_non_pct,
+            )
             arrow = "▲" if delta > 0 else "▼" if delta < 0 else ""
 
             # Format value
             metric_type = metric_type_map.get(column, "per_match")
-            formatted_value = format_metric_value(value, column)
+            formatted_value = format_metric_value(
+                value,
+                column,
+                use_per90_for_non_pct=use_per90_for_non_pct and metric_type != "percentage",
+            )
 
             # Tooltip content
             tooltip_lines = [f"{title}"]
@@ -940,9 +1000,22 @@ def display_metric_card(col, title, value, delta_df, reference_df, column, color
                 tooltip_lines.append(f"Avg Delta: {delta_avg:.1f}%")
 
             else:
-                reference_avg = compute_metric_average(reference_df, column)
-                delta_avg = compute_metric_average(delta_df, column)
-                suffix = "%" if metric_type == "percentage" else ""
+                reference_avg = compute_metric_average(
+                    reference_df,
+                    column,
+                    use_per90_for_non_pct=use_per90_for_non_pct,
+                )
+                delta_avg = compute_metric_average(
+                    delta_df,
+                    column,
+                    use_per90_for_non_pct=use_per90_for_non_pct,
+                )
+                if metric_type == "percentage":
+                    suffix = "%"
+                elif use_per90_for_non_pct:
+                    suffix = " /90"
+                else:
+                    suffix = ""
                 tooltip_lines.append(f"Avg Reference: {reference_avg:.1f}{suffix}")
                 tooltip_lines.append(f"Avg Delta: {delta_avg:.1f}{suffix}")
 
@@ -1339,6 +1412,43 @@ with st.container():
                 unsafe_allow_html=True
             )
 
+# --- Match minutes lookup (selected player) ---
+player_minutes_lookup_df = pd.DataFrame(columns=["matchId", "minutes_reference"])
+if {"matchId", "minutesPlayed"}.issubset(player_data.columns):
+    try:
+        minutes_src = player_data[["matchId", "minutesPlayed"]].copy()
+        if "playerId" in player_data.columns and pd.notna(_pid):
+            minutes_src["playerId"] = to_int64_id(player_data["playerId"])
+            minutes_src = minutes_src[minutes_src["playerId"] == _pid].copy()
+        minutes_src["matchId"] = to_int64_id(minutes_src["matchId"])
+        minutes_src["minutes_reference"] = pd.to_numeric(minutes_src["minutesPlayed"], errors="coerce").fillna(0.0)
+        player_minutes_lookup_df = (
+            minutes_src.dropna(subset=["matchId"])
+            .groupby("matchId", as_index=False)["minutes_reference"]
+            .max()
+        )
+    except Exception:
+        player_minutes_lookup_df = pd.DataFrame(columns=["matchId", "minutes_reference"])
+
+
+def attach_minutes_reference(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if out.empty:
+        out["minutes_reference"] = pd.Series(dtype=float)
+        return out
+
+    if "matchId" not in out.columns:
+        out["minutes_reference"] = 0.0
+        return out
+
+    out["matchId"] = to_int64_id(out["matchId"])
+    if not player_minutes_lookup_df.empty:
+        out = out.merge(player_minutes_lookup_df, on="matchId", how="left")
+    if "minutes_reference" not in out.columns:
+        out["minutes_reference"] = 0.0
+    out["minutes_reference"] = pd.to_numeric(out["minutes_reference"], errors="coerce").fillna(0.0)
+    return out
+
 
 if section == "Overview Stats":
     st.markdown("""
@@ -1390,6 +1500,7 @@ if section == "Overview Stats":
         summary_df["is_main_period"] | summary_df["is_reference_period"]
     ].copy()
     period_filtered_df = period_filtered_df.drop_duplicates(subset="matchId", keep="last")
+    period_filtered_df = attach_minutes_reference(period_filtered_df)
 
     # Only fill NaNs for numeric columns.
     num_cols = period_filtered_df.select_dtypes(include=["number"]).columns
@@ -1422,15 +1533,34 @@ if section == "Overview Stats":
     )
     date_str = period_filtered_df["matchDate"].dt.strftime("%Y-%m-%d").fillna("Unknown date")
     opp_str = period_filtered_df["oppositionTeamName"].astype("string").fillna("Unknown")
+    minutes_int = pd.to_numeric(period_filtered_df["minutes_reference"], errors="coerce").fillna(0).round(0).astype(int)
+    minutes_label = minutes_int.astype(str) + " min"
     period_filtered_df["match_label"] = (
-        date_str + " vs " + opp_str + " - " + period_filtered_df["period_tag"]
+        date_str + " vs " + opp_str + " - " + period_filtered_df["period_tag"] + " (" + minutes_label + ")"
     )
 
     # --- Match Filter Styled Like Excel ---
     with st.expander("Filter by Match (click to hide)", expanded=True):
         st.caption("Filter matches used in the selected period and in the comparison period.")
+        min_minutes_filter = st.number_input(
+            "Minimum minutes played",
+            min_value=0,
+            max_value=130,
+            value=int(st.session_state.get("dashboard_min_minutes_filter", 0)),
+            step=1,
+            key="dashboard_min_minutes_filter",
+            help="Only matches where the selected player played at least this many minutes.",
+        )
+
+        eligible_df = period_filtered_df[
+            pd.to_numeric(period_filtered_df["minutes_reference"], errors="coerce").fillna(0.0) >= float(min_minutes_filter)
+        ].copy()
+
+        if eligible_df.empty:
+            st.warning("No matches meet the selected minimum minutes filter.")
+
         match_options = (
-            period_filtered_df[["matchId", "match_label", "matchDate", "period_tag"]]
+            eligible_df[["matchId", "match_label", "matchDate", "period_tag", "minutes_reference"]]
             .drop_duplicates()
             .sort_values("matchDate")
         )
@@ -1486,9 +1616,9 @@ if section == "Overview Stats":
     # Apply match filter (guard empty state)
     current_selected = st.session_state.get("selected_match_ids_kpi", [])
     if current_selected:
-        selected_matches_df = period_filtered_df[period_filtered_df["matchId"].isin(current_selected)].copy()
+        selected_matches_df = eligible_df[eligible_df["matchId"].isin(current_selected)].copy()
     else:
-        selected_matches_df = period_filtered_df.iloc[0:0].copy()
+        selected_matches_df = eligible_df.iloc[0:0].copy()
 
     # Early exit if no rows after filters
     if selected_matches_df.empty:
@@ -1508,6 +1638,12 @@ if section == "Overview Stats":
     st.caption(
         f"Selected matches: {int(main_df['matchId'].nunique())} | "
         f"Comparison matches: {int(reference_df['matchId'].nunique())}"
+    )
+    use_per90_for_non_pct_main = st.toggle(
+        "Use per 90 for non-% KPIs",
+        value=st.session_state.get("overview_use_per90_non_pct", False),
+        key="overview_use_per90_non_pct",
+        help="When enabled, non-percentage KPIs are normalized by minutes played (per 90).",
     )
 
     # --- Set metric_keys dynamically by position ---
@@ -1547,6 +1683,11 @@ if section == "Overview Stats":
             # Sum or mean depending on type
             if metric_type == "percentage":
                 aggregated_metrics[key] = round(pd.to_numeric(main_df[key], errors="coerce").mean(), 1)
+            elif use_per90_for_non_pct_main:
+                aggregated_metrics[key] = round(
+                    compute_metric_average(main_df, key, use_per90_for_non_pct=True),
+                    2,
+                )
             else:
                 aggregated_metrics[key] = round(pd.to_numeric(main_df[key], errors="coerce").sum(), 2)
 
@@ -1559,17 +1700,46 @@ if section == "Overview Stats":
         for i, key in enumerate(chunk):
             label = metric_labels.get(key, key.replace("_", " ").title())
             value = aggregated_metrics.get(key, "N/A")
-            display_metric_card(cols[i], label, value, main_df, reference_df, key, color="#fcec03")
+            display_metric_card(
+                cols[i],
+                label,
+                value,
+                main_df,
+                reference_df,
+                key,
+                color="#fcec03",
+                use_per90_for_non_pct=use_per90_for_non_pct_main,
+            )
 
     with st.expander("Export PDF Report", expanded=False):
         season_value = st.session_state.get("selected_season") or "All seasons"
         selected_match_map = dict(zip(match_options["matchId"], match_options["match_label"]))
         selected_match_labels = [selected_match_map.get(mid, str(mid)) for mid in current_selected]
-        cover_player_key = f"{player_id}_{player_name}"
+        cover_player_key = build_cover_player_key(player_name=player_name, player_id=player_id)
         cover_session_key = f"player_report_cover_photo_path_{player_id}"
 
         if cover_session_key not in st.session_state:
             history = list_cover_photos(base_dir=BASE_DIR, player_key=cover_player_key)
+            if not history:
+                legacy_keys = [
+                    f"{player_id}_{player_name}",
+                    f"individual_{player_id}_{player_name}",
+                ]
+                for legacy_key in legacy_keys:
+                    if legacy_key == cover_player_key:
+                        continue
+                    legacy_history = list_cover_photos(base_dir=BASE_DIR, player_key=legacy_key)
+                    if legacy_history:
+                        try:
+                            migrate_cover_photo_from_path(
+                                image_path=legacy_history[0]["path"],
+                                base_dir=BASE_DIR,
+                                player_key=cover_player_key,
+                            )
+                            history = list_cover_photos(base_dir=BASE_DIR, player_key=cover_player_key)
+                        except Exception:
+                            history = legacy_history
+                        break
             st.session_state[cover_session_key] = history[0]["path"] if history else None
 
         if st.button("Manage player cover photo", key="manage_player_report_cover_photo"):
@@ -1715,15 +1885,43 @@ if section == "Overview Stats":
                                 if chart_data.empty:
                                     continue
 
-                                reference_avg = compute_metric_average(reference_df, key)
+                                is_percentage_metric = metric_type_map.get(key) == "percentage"
+                                kpi_pdf_label = metric_labels.get(key, key)
+                                if use_per90_for_non_pct_main and not is_percentage_metric:
+                                    minutes_col = None
+                                    if "minutesPlayed" in trends_source_df.columns:
+                                        minutes_col = "minutesPlayed"
+                                    elif "minutes_reference" in trends_source_df.columns:
+                                        minutes_col = "minutes_reference"
+
+                                    if minutes_col:
+                                        chart_data["_minutes_for_per90"] = pd.to_numeric(
+                                            trends_source_df.loc[chart_data.index, minutes_col],
+                                            errors="coerce",
+                                        ).fillna(0.0)
+                                        chart_data[key] = np.where(
+                                            chart_data["_minutes_for_per90"] > 0,
+                                            (pd.to_numeric(chart_data[key], errors="coerce") / chart_data["_minutes_for_per90"]) * 90.0,
+                                            np.nan,
+                                        )
+                                        chart_data = chart_data.dropna(subset=[key]).copy()
+                                        if chart_data.empty:
+                                            continue
+                                    kpi_pdf_label = f"{kpi_pdf_label} (per 90)"
+
+                                reference_avg = compute_metric_average(
+                                    reference_df,
+                                    key,
+                                    use_per90_for_non_pct=use_per90_for_non_pct_main,
+                                )
                                 fig = px.bar(
                                     chart_data,
                                     x="opponent_label",
                                     y=key,
-                                    title=metric_labels.get(key, key),
+                                    title=kpi_pdf_label,
                                     color_discrete_sequence=["#fcec03"],
                                     hover_data=hover_cols,
-                                    labels={key: metric_labels.get(key, key)},
+                                    labels={key: kpi_pdf_label},
                                     height=300,
                                 )
                                 fig.add_hline(
@@ -1735,14 +1933,14 @@ if section == "Overview Stats":
                                 )
                                 fig.update_layout(
                                     xaxis_title="Match",
-                                    yaxis_title=metric_labels.get(key, key),
+                                    yaxis_title=kpi_pdf_label,
                                     showlegend=False,
                                     xaxis_tickangle=-35,
                                     margin=dict(l=55, r=25, t=55, b=115),
                                 )
                                 fig.update_xaxes(automargin=True)
                                 fig.update_yaxes(automargin=True)
-                                trends_data_pdf.append({"kpi_name": metric_labels.get(key, key), "fig": fig})
+                                trends_data_pdf.append({"kpi_name": kpi_pdf_label, "fig": fig})
 
                         safe_name = _safe_pdf_filename(player_name)
                         file_name = f"{safe_name}_player_report.pdf"
@@ -1816,11 +2014,28 @@ if section == "Overview Stats":
     display_df = selected_matches_df.copy()
     display_df = display_df.drop(columns=["match_date_only", "is_main_period", "is_reference_period"], errors="ignore")
     display_df = display_df.rename(columns={"period_tag": "Usage"})
+    if "minutes_reference" in display_df.columns:
+        display_df["minutes_reference"] = pd.to_numeric(display_df["minutes_reference"], errors="coerce").fillna(0).round(0).astype(int)
+        display_df = display_df.rename(columns={"minutes_reference": "Minutes Played"})
 
     # Format KPI columns like the scorecards
     for col in selected_kpis:
         if col in display_df.columns:
-            display_df[col] = display_df[col].apply(lambda x: format_metric_value(x, col))
+            if (
+                use_per90_for_non_pct_main
+                and metric_type_map.get(col) != "percentage"
+                and "Minutes Played" in display_df.columns
+            ):
+                value_series = pd.to_numeric(display_df[col], errors="coerce")
+                minutes_series = pd.to_numeric(display_df["Minutes Played"], errors="coerce").replace(0, np.nan)
+                display_df[col] = (value_series / minutes_series) * 90.0
+            display_df[col] = display_df[col].apply(
+                lambda x: format_metric_value(
+                    x,
+                    col,
+                    use_per90_for_non_pct=use_per90_for_non_pct_main and metric_type_map.get(col) != "percentage",
+                )
+            )
 
     # Optional: sort and reset
     display_df = display_df.sort_values("matchDate").reset_index(drop=True)
@@ -1855,6 +2070,12 @@ if section == "Overview Stats":
 
 elif section == "Trends Stats":
     st.info("Performance Trends Over Time")
+    use_per90_for_non_pct_main = st.toggle(
+        "Use per 90 for non-% KPIs",
+        value=st.session_state.get("overview_use_per90_non_pct", False),
+        key="overview_use_per90_non_pct",
+        help="When enabled, non-percentage KPIs in trends are normalized by minutes played (per 90).",
+    )
 
     # Ensure team names are present
     if "oppositionTeamName" not in filtered_df.columns:
@@ -1867,11 +2088,21 @@ elif section == "Trends Stats":
     else:
         trends_df = filtered_df.copy()
 
+    trends_df = attach_minutes_reference(trends_df)
+
     # Sort by matchDate
     trends_df = trends_df.sort_values("matchDate").copy()
 
     # Create opponent_label once
-    trends_df["opponent_label"] = trends_df["matchDate"].dt.strftime("%b %d") + " - " + trends_df["oppositionTeamName"]
+    trend_minutes_int = pd.to_numeric(trends_df["minutes_reference"], errors="coerce").fillna(0).round(0).astype(int)
+    trends_df["opponent_label"] = (
+        trends_df["matchDate"].dt.strftime("%b %d")
+        + " - "
+        + trends_df["oppositionTeamName"].astype("string").fillna("Unknown")
+        + " ("
+        + trend_minutes_int.astype(str)
+        + " min)"
+    )
 
     # Create match_order
     trends_df["match_order"] = range(len(trends_df))
@@ -1881,7 +2112,24 @@ elif section == "Trends Stats":
 
     # --- Match Filter ---
     with st.expander("Filter by Match (click to hide)", expanded=True):
-        match_options = trends_df[["matchId", "opponent_label", "matchDate"]].drop_duplicates().sort_values("matchDate")
+        min_minutes_filter = st.number_input(
+            "Minimum minutes played",
+            min_value=0,
+            max_value=130,
+            value=int(st.session_state.get("dashboard_min_minutes_filter", 0)),
+            step=1,
+            key="dashboard_min_minutes_filter",
+            help="Only matches where the selected player played at least this many minutes.",
+        )
+
+        trends_df = trends_df[
+            pd.to_numeric(trends_df["minutes_reference"], errors="coerce").fillna(0.0) >= float(min_minutes_filter)
+        ].copy()
+
+        if trends_df.empty:
+            st.warning("No matches meet the selected minimum minutes filter.")
+
+        match_options = trends_df[["matchId", "opponent_label", "matchDate", "minutes_reference"]].drop_duplicates().sort_values("matchDate")
         all_match_ids = list(match_options["matchId"])
         state_key = "selected_match_ids_trends"
 
@@ -1938,17 +2186,40 @@ elif section == "Trends Stats":
         if chart_data.empty:
             continue
 
-        season_avg = metrics_summary[key].mean()
+        is_percentage_metric = metric_type_map.get(key) == "percentage"
+        kpi_display_label = metric_labels.get(key, key)
+        if use_per90_for_non_pct_main and not is_percentage_metric:
+            minutes_col = "minutesPlayed" if "minutesPlayed" in trends_df.columns else "minutes_reference"
+            if minutes_col in trends_df.columns:
+                chart_data["_minutes_for_per90"] = pd.to_numeric(
+                    trends_df.loc[chart_data.index, minutes_col],
+                    errors="coerce",
+                ).fillna(0.0)
+                chart_data[key] = np.where(
+                    chart_data["_minutes_for_per90"] > 0,
+                    (pd.to_numeric(chart_data[key], errors="coerce") / chart_data["_minutes_for_per90"]) * 90.0,
+                    np.nan,
+                )
+                chart_data = chart_data.dropna(subset=[key]).copy()
+                if chart_data.empty:
+                    continue
+            kpi_display_label = f"{kpi_display_label} (per 90)"
+
+        season_avg = compute_metric_average(
+            trends_df,
+            key,
+            use_per90_for_non_pct=use_per90_for_non_pct_main,
+        )
 
         # Create the bar chart
         fig = px.bar(
             chart_data,
             x="opponent_label",
             y=key,
-            title=metric_labels[key],
+            title=kpi_display_label,
             color_discrete_sequence=["#fcec03"],  # Yellow color
             hover_data=metric_tooltip_fields.get(key, []),
-            labels={key: metric_labels[key]},
+            labels={key: kpi_display_label},
             height=300
         )
             
@@ -1964,7 +2235,7 @@ elif section == "Trends Stats":
         # Update layout for better readability
         fig.update_layout(
             xaxis_title="Match",
-            yaxis_title=metric_labels[key],
+            yaxis_title=kpi_display_label,
             showlegend=False,
             xaxis_tickangle=-45
         )
@@ -2134,12 +2405,36 @@ elif section == "Player Comparison":
         "Striker": ["FW", "ST", "CF"]
     }
 
-    position_codes = reverse_position_map.get(player_position, [])
+    default_profile = player_position if player_position in reverse_position_map else next(iter(reverse_position_map.keys()))
+    selected_position_profiles = st.multiselect(
+        "Comparison position profiles (for other players)",
+        options=list(reverse_position_map.keys()),
+        default=[default_profile],
+        key="comparison_position_profiles",
+        help=(
+            "These position profiles are applied to comparison players. "
+            "The logged player keeps all his matches in the selected season/date/team filters."
+        ),
+    )
+    if not selected_position_profiles:
+        st.warning("Select at least one comparison position profile.")
+        st.stop()
+
+    position_codes = sorted(
+        {
+            code
+            for profile in selected_position_profiles
+            for code in reverse_position_map.get(profile, [])
+        }
+    )
     if not position_codes:
         st.error(f"❌ No position codes found for player position: {player_position}")
         st.stop()
 
-    st.write(f"Position codes resolved for **{player_position}** → {position_codes}")
+    st.write(
+        "Comparison position codes resolved for "
+        f"**{', '.join(selected_position_profiles)}** → {position_codes}"
+    )
 
     # ---------- Team Filter UI (ordered by points, top 5 pre-selected) ----------
     with st.expander("Filter by Teams", expanded=False):
@@ -2283,13 +2578,52 @@ elif section == "Player Comparison":
     if players_full["startDate"].isna().all():
         st.warning("⚠️ No startDate merged from match_data — check matchId alignment or competition filter.")
 
-    # Apply selected teams and selected position (same role as logged-in player).
+    # Apply selected teams and position profiles for comparison players only.
+    # For comparison players, infer a primary position from non-Sub rows.
+    # Then keep all their matches (including Sub) once they qualify.
+    logged_player_id = str(player_id)
     selected_team_ids_set = set(pd.to_numeric(pd.Series(selected_team_ids), errors="coerce").dropna().astype("Int64").tolist())
     players_scope_all = players_full[players_full["teamId"].isin(selected_team_ids_set)].copy()
 
     position_codes_set = {str(code).strip().upper() for code in position_codes}
-    players_scope_all["position"] = players_scope_all["position"].astype("string").str.strip().str.upper()
-    players_full = players_scope_all[players_scope_all["position"].isin(position_codes_set)].copy()
+    players_scope_all["position"] = (
+        players_scope_all["position"]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+        .str.upper()
+    )
+    logged_player_rows = players_scope_all[players_scope_all["playerId"].astype(str) == logged_player_id].copy()
+    comparison_scope = players_scope_all[players_scope_all["playerId"].astype(str) != logged_player_id].copy()
+
+    non_sub_scope = comparison_scope[~comparison_scope["position"].isin({"", "SUB", "NONE", "NAN"})].copy()
+    if not non_sub_scope.empty:
+        inferred_primary_pos = (
+            non_sub_scope.groupby("playerId")["position"]
+            .agg(lambda s: s.value_counts().index[0] if not s.empty else "")
+            .reset_index(name="primary_position")
+        )
+    else:
+        inferred_primary_pos = pd.DataFrame(columns=["playerId", "primary_position"])
+
+    eligible_comp_ids = set(
+        inferred_primary_pos[
+            inferred_primary_pos["primary_position"].isin(position_codes_set)
+        ]["playerId"].tolist()
+    )
+
+    # Fallback for players with no reliable non-Sub history in scope.
+    fallback_comp_ids = set(
+        comparison_scope[
+            comparison_scope["position"].isin(position_codes_set)
+        ]["playerId"].tolist()
+    )
+    eligible_comp_ids = eligible_comp_ids | fallback_comp_ids
+
+    comparison_players_rows = comparison_scope[
+        comparison_scope["playerId"].isin(eligible_comp_ids)
+    ].copy()
+    players_full = pd.concat([logged_player_rows, comparison_players_rows], ignore_index=True)
 
     if players_full.empty:
         st.warning("No players found for the selected teams and position.")
@@ -2343,8 +2677,6 @@ elif section == "Player Comparison":
         .clip(lower=0.0, upper=100.0)
         .round(1)
     )
-
-    logged_player_id = str(player_id)
 
     with st.expander("Player Selector", expanded=True):
         max_players_to_show = st.number_input(
@@ -2483,6 +2815,10 @@ elif section == "Player Comparison":
     player_list_table_placeholder.dataframe(
         summary_display[summary_table_columns],
         use_container_width=True,
+    )
+    st.caption(
+        "Games Played in this comparison are calculated after applying current filters. "
+        "Logged player: season/date/teams. Comparison players: season/date/teams + selected position profiles."
     )
 
 

@@ -6,6 +6,7 @@ import tempfile
 import plotly.io as pio
 import numpy as np  # ← AÑADIR ESTA LÍNEA
 import plotly.graph_objects as go  # ← AÑADIR ESTA LÍNEA
+from PIL import Image
 
 
 def _write_plotly_png(fig, output_path: str, width: int, height: int, scale: float = 1.0) -> None:
@@ -15,6 +16,48 @@ def _write_plotly_png(fig, output_path: str, width: int, height: int, scale: flo
     except TypeError:
         # Older kaleido/plotly stacks may not accept the engine kwarg.
         pio.write_image(fig, output_path, width=int(width), height=int(height), scale=scale)
+
+
+def _draw_image_fit_box(
+    pdf: FPDF,
+    image_path: str,
+    x: float,
+    y: float,
+    max_w: float,
+    max_h: float,
+    inner_padding: float = 0.0,
+) -> tuple[float, float]:
+    """
+    Draw image preserving original aspect ratio within a bounding box.
+    Returns drawn (width_mm, height_mm).
+    """
+    pad = max(0.0, float(inner_padding))
+    box_x = x + pad
+    box_y = y + pad
+    box_w = max_w - (2.0 * pad)
+    box_h = max_h - (2.0 * pad)
+    if box_w <= 0 or box_h <= 0:
+        box_x, box_y, box_w, box_h = x, y, max_w, max_h
+
+    try:
+        with Image.open(image_path) as im:
+            src_w, src_h = im.size
+    except Exception:
+        pdf.image(image_path, x=box_x, y=box_y, w=box_w, h=box_h)
+        return box_w, box_h
+
+    if src_w <= 0 or src_h <= 0:
+        pdf.image(image_path, x=box_x, y=box_y, w=box_w, h=box_h)
+        return box_w, box_h
+
+    scale = min(box_w / float(src_w), box_h / float(src_h))
+    draw_w = float(src_w) * scale
+    draw_h = float(src_h) * scale
+
+    draw_x = box_x + (box_w - draw_w) / 2.0
+    draw_y = box_y + (box_h - draw_h) / 2.0
+    pdf.image(image_path, x=draw_x, y=draw_y, w=draw_w, h=draw_h)
+    return draw_w, draw_h
 
 
 class WatfordPlayerReport(FPDF):
@@ -1473,6 +1516,8 @@ def generate_individual_development_report_landscape(
     logo_path: str = "img/watford_logo.png",
     background_image_path: str = "img/Watford_portada.jpg",
     player_photo_path: str | None = None,
+    player_position: str | None = None,
+    player_age: int | None = None,
     cover_only: bool = False,
 ):
     """
@@ -1487,12 +1532,22 @@ def generate_individual_development_report_landscape(
     import plotly.graph_objects as go
     
     class IndividualDevelopmentLandscape(FPDF):
-        def __init__(self, player_name, logo_path, background_image_path, player_photo_path=None):
+        def __init__(
+            self,
+            player_name,
+            logo_path,
+            background_image_path,
+            player_photo_path=None,
+            player_position=None,
+            player_age=None,
+        ):
             super().__init__(orientation='L', unit='mm', format='A4')
             self.player_name = player_name
             self.logo_path = logo_path
             self.background_image_path = background_image_path
             self.player_photo_path = player_photo_path
+            self.player_position = player_position
+            self.player_age = player_age
             self.set_auto_page_break(auto=False)
             
             self.COLOR_YELLOW = (252, 236, 3)
@@ -1506,34 +1561,46 @@ def generate_individual_development_report_landscape(
             self.COLOR_MUTED_TEXT = (94, 102, 111)
             self.COLOR_CARD_BORDER = (190, 196, 204)
             self.COLOR_CARD_SHADOW = (210, 214, 220)
+            self.COLOR_SURFACE = (255, 255, 255)
+            self.COLOR_BORDER_LIGHT = (218, 223, 230)
+            self.COLOR_ROW_ALT = (242, 245, 249)
         
         def header(self):
-            """Header con nombre CENTRADO VERTICALMENTE"""
+            """Professional content-page shell (light body + dark top band)."""
             if self.page_no() > 1:
-                # Fondo gris
-                self.set_fill_color(*self.COLOR_GRAY_BG)
+                # Light content background
+                self.set_fill_color(*self.COLOR_LIGHT_BG)
                 self.rect(0, 0, 297, 210, 'F')
-                
-                # ===== NOMBRE CENTRADO VERTICALMENTE =====
-                self.set_xy(150, 12)  # ← AJUSTADO para centrar verticalmente
-                self.set_font('Arial', 'B', 26)  # ← REDUCIDO para no chocar con logo
+
+                # Top brand bar
+                self.set_fill_color(*self.COLOR_CHARCOAL)
+                self.rect(0, 0, 297, 24, 'F')
+                self.set_fill_color(*self.COLOR_RED)
+                self.rect(0, 24, 297, 1.8, 'F')
+
+                # Player name on top bar
+                self.set_xy(14, 7)
+                self.set_font('Arial', 'B', 14)
                 self.set_text_color(*self.COLOR_WHITE)
-                self.cell(110, 15, self.player_name.upper(), 0, 0, 'R')  # ← Ancho reducido
-                
+                self.cell(230, 8, self.player_name.upper(), 0, 0, 'L')
+
                 # Logo
                 try:
                     if os.path.exists(self.logo_path):
-                        self.image(self.logo_path, x=270, y=8, w=20)
+                        self.image(self.logo_path, x=272, y=5, w=18)
                 except:
                     pass
-                
-                self.set_y(35)
+
+                self.set_y(34)
         
         def footer(self):
             if self.page_no() > 1:
-                self.set_y(-15)
-                self.set_font('Arial', 'I', 10)
-                self.set_text_color(*self.COLOR_WHITE)
+                self.set_draw_color(*self.COLOR_BORDER_LIGHT)
+                self.set_line_width(0.4)
+                self.line(14, 197, 283, 197)
+                self.set_y(-14)
+                self.set_font('Arial', '', 9)
+                self.set_text_color(*self.COLOR_MUTED_TEXT)
                 self.cell(0, 10, 'Individual Development Report', 0, 0, 'C')
                 page_text = f'Page {self.page_no() - 1}'
                 self.cell(0, 10, page_text, 0, 0, 'R')
@@ -1625,6 +1692,44 @@ def generate_individual_development_report_landscape(
             self.line(content_x, 74, 178, 74)
             self.line(content_x, 146, 178, 146)
 
+            # Core player metadata block.
+            meta_x = content_x
+            meta_w = 86
+            card_h = 24
+            gap_h = 8
+            meta_top = 86
+
+            age_text = "-"
+            if self.player_age is not None:
+                try:
+                    age_text = f"{int(self.player_age)} years"
+                except Exception:
+                    age_text = str(self.player_age)
+            position_text = str(self.player_position).strip() if self.player_position else "-"
+
+            metadata_rows = [
+                ("POSITION", position_text),
+                ("AGE", age_text),
+            ]
+
+            for idx, (label, value) in enumerate(metadata_rows):
+                row_y = meta_top + idx * (card_h + gap_h)
+                self.set_fill_color(*self.COLOR_SURFACE)
+                self.rect(meta_x, row_y, meta_w, card_h, 'F')
+                self.set_draw_color(*self.COLOR_BORDER_LIGHT)
+                self.set_line_width(0.45)
+                self.rect(meta_x, row_y, meta_w, card_h, 'D')
+
+                self.set_xy(meta_x + 4, row_y + 3)
+                self.set_font('Arial', '', 8)
+                self.set_text_color(*self.COLOR_MUTED_TEXT)
+                self.cell(meta_w - 8, 4, label, 0, 1, 'L')
+
+                self.set_x(meta_x + 4)
+                self.set_font('Arial', 'B', 12)
+                self.set_text_color(*self.COLOR_CHARCOAL)
+                self.cell(meta_w - 8, 8, value, 0, 0, 'L')
+
             generated_date = datetime.now().strftime("%B %d, %Y")
             self.set_xy(content_x, 186)
             self.set_font('Arial', '', 10)
@@ -1637,14 +1742,34 @@ def generate_individual_development_report_landscape(
             self.add_page()
             
             self.set_font('Arial', 'B', 20)
-            self.set_text_color(*self.COLOR_WHITE)
+            self.set_text_color(*self.COLOR_CHARCOAL)
             self.cell(0, 12, 'INDIVIDUAL ACTIVITIES', 0, 1, 'L')
-            self.ln(3)
+            self.set_font('Arial', '', 10)
+            self.set_text_color(*self.COLOR_MUTED_TEXT)
+            self.cell(0, 6, 'Activity distribution and detailed log', 0, 1, 'L')
+            self.ln(2)
             
             if fig_comparison_path and os.path.exists(fig_comparison_path):
                 try:
-                    self.image(fig_comparison_path, x=15, y=50, w=250, h=80)
-                    self.set_y(135)
+                    chart_x = 15
+                    chart_y = 46
+                    chart_w = 267
+                    chart_h = 80
+                    self.set_fill_color(*self.COLOR_SURFACE)
+                    self.rect(chart_x, chart_y, chart_w, chart_h, 'F')
+                    self.set_draw_color(*self.COLOR_BORDER_LIGHT)
+                    self.set_line_width(0.5)
+                    self.rect(chart_x, chart_y, chart_w, chart_h, 'D')
+                    _draw_image_fit_box(
+                        self,
+                        fig_comparison_path,
+                        chart_x,
+                        chart_y,
+                        chart_w,
+                        chart_h,
+                        inner_padding=3.5,
+                    )
+                    self.set_y(chart_y + chart_h + 6)
                 except Exception as e:
                     print(f"Error inserting chart: {e}")
                     self.set_y(50)
@@ -1657,7 +1782,7 @@ def generate_individual_development_report_landscape(
         def _activities_table_paginated(self, df_actividades):
             if df_actividades.empty:
                 self.set_font('Arial', 'I', 12)
-                self.set_text_color(*self.COLOR_WHITE)
+                self.set_text_color(*self.COLOR_MUTED_TEXT)
                 self.cell(0, 10, 'No activities registered', 0, 1, 'C')
                 return
             
@@ -1725,7 +1850,7 @@ def generate_individual_development_report_landscape(
                 if self.get_y() + row_height > 180:
                     self.add_page()
                     self.set_font('Arial', 'B', 20)
-                    self.set_text_color(*self.COLOR_WHITE)
+                    self.set_text_color(*self.COLOR_CHARCOAL)
                     self.cell(0, 12, 'INDIVIDUAL ACTIVITIES (continued)', 0, 1, 'L')
                     self.ln(3)
                     print_headers()
@@ -1734,15 +1859,16 @@ def generate_individual_development_report_landscape(
                 x_start, y_start = self.get_x(), self.get_y()
                 fill = idx % 2 == 0
                 if fill:
-                    self.set_fill_color(245, 245, 245)
+                    self.set_fill_color(*self.COLOR_ROW_ALT)
                 else:
-                    self.set_fill_color(255, 255, 255)
+                    self.set_fill_color(*self.COLOR_SURFACE)
                 
                 for col_idx, (col_name, width) in enumerate(zip(df_table.columns, actual_widths)):
                     value = str(row[col_name]) if pd.notna(row[col_name]) and row[col_name] != '' else ''
                     x_col = x_start + sum(actual_widths[:col_idx])
                     
                     self.set_xy(x_col, y_start)
+                    self.set_draw_color(*self.COLOR_BORDER_LIGHT)
                     self.rect(x_col, y_start, width, row_height, 'DF')
                     
                     y_text = y_start + 1
@@ -1772,39 +1898,70 @@ def generate_individual_development_report_landscape(
             self.add_page()
             
             self.set_font('Arial', 'B', 22)
-            self.set_text_color(*self.COLOR_WHITE)
+            self.set_text_color(*self.COLOR_CHARCOAL)
             self.cell(0, 12, f'{self.player_name.upper()} EVOLUTION', 0, 1, 'L')
-            self.ln(5)
-            
-            # ===== TIMELINE SIN DEFORMAR =====
+            self.set_font('Arial', '', 10)
+            self.set_text_color(*self.COLOR_MUTED_TEXT)
+            self.cell(0, 6, 'Progression timeline and monthly rating trend', 0, 1, 'L')
+            self.ln(2)
+
+            chart_x = 15
+            chart_w = 267
+            content_bottom = 188
+            cursor_y = self.get_y()
+
+            # Timeline chart
             if fig_timeline_path and os.path.exists(fig_timeline_path):
                 try:
-                    # Ajustar tamaño para evitar deformación
-                    # self.image(fig_timeline_path, x=15, y=50, w=265, h=55)  # ← AJUSTADO
-                    # ✅ Timeline con mejor proporción
-                    self.image(fig_timeline_path, x=15, y=50, w=265, h=70)
-                    self.set_y(110)
+                    timeline_box_h = 64 if (fig_rating_path and os.path.exists(fig_rating_path)) else 118
+                    self.set_fill_color(*self.COLOR_SURFACE)
+                    self.rect(chart_x, cursor_y, chart_w, timeline_box_h, 'F')
+                    self.set_draw_color(*self.COLOR_BORDER_LIGHT)
+                    self.set_line_width(0.5)
+                    self.rect(chart_x, cursor_y, chart_w, timeline_box_h, 'D')
+                    _draw_image_fit_box(
+                        self,
+                        fig_timeline_path,
+                        chart_x,
+                        cursor_y,
+                        chart_w,
+                        timeline_box_h,
+                        inner_padding=3.5,
+                    )
+                    cursor_y = cursor_y + timeline_box_h + 6
                 except Exception as e:
                     print(f"Error inserting timeline: {e}")
-                    self.set_y(50)
-            
-            # Rating Evolution
+
+            # Rating chart
             if fig_rating_path and os.path.exists(fig_rating_path):
                 try:
-                    self.ln(2)
-                    self.set_font('Arial', 'B', 16)
-                    self.set_text_color(*self.COLOR_WHITE)
-                    self.cell(0, 10, '', 0, 1, 'L')
-                    self.ln(2)
-                    # Ajustar tamaño para rating
-                    # self.image(fig_rating_path, x=15, y=self.get_y(), w=265, h=60)  # ← AJUSTADO
-                    # ✅ Rating con mejor proporción
-                    self.image(fig_rating_path, x=15, y=self.get_y(), w=265, h=75)
+                    remaining_h = max(42, content_bottom - cursor_y)
+                    self.set_fill_color(*self.COLOR_SURFACE)
+                    self.rect(chart_x, cursor_y, chart_w, remaining_h, 'F')
+                    self.set_draw_color(*self.COLOR_BORDER_LIGHT)
+                    self.set_line_width(0.5)
+                    self.rect(chart_x, cursor_y, chart_w, remaining_h, 'D')
+                    _draw_image_fit_box(
+                        self,
+                        fig_rating_path,
+                        chart_x,
+                        cursor_y,
+                        chart_w,
+                        remaining_h,
+                        inner_padding=3.5,
+                    )
                 except Exception as e:
                     print(f"Error inserting rating: {e}")
     
     # ========== GENERAR PDF ==========
-    pdf = IndividualDevelopmentLandscape(player_name, logo_path, background_image_path, player_photo_path)
+    pdf = IndividualDevelopmentLandscape(
+        player_name,
+        logo_path,
+        background_image_path,
+        player_photo_path,
+        player_position,
+        player_age,
+    )
     pdf.cover_page_max_alleyne_style()
     df_actividades = df_activities if isinstance(df_activities, pd.DataFrame) else pd.DataFrame()
     
@@ -1819,7 +1976,7 @@ def generate_individual_development_report_landscape(
             temp_comparison_path = temp_comparison.name
             temp_comparison.close()
             try:
-                _write_plotly_png(fig_comparison, temp_comparison_path, width=900, height=320, scale=1.0)
+                _write_plotly_png(fig_comparison, temp_comparison_path, width=900, height=320, scale=2.0)
                 fig_comparison_path = temp_comparison_path
                 temp_files.append(temp_comparison_path)
             except Exception as e:
@@ -1837,7 +1994,7 @@ def generate_individual_development_report_landscape(
                 # ===== REDUCIR ALTURA PARA EVITAR DEFORMACIÓN =====
                 # pio.write_image(fig_timeline, temp_timeline.name, width=1200, height=350)  # ← AJUSTADO
                 # ✅ MAYOR RESOLUCIÓN PARA MEJOR CALIDAD
-                _write_plotly_png(fig_timeline, temp_timeline_path, width=1200, height=380, scale=1.0)
+                _write_plotly_png(fig_timeline, temp_timeline_path, width=1200, height=380, scale=2.0)
                 fig_timeline_path = temp_timeline_path
                 temp_files.append(temp_timeline_path)
             except Exception as e:
@@ -1961,7 +2118,7 @@ def generate_individual_development_report_landscape(
                         )
                     )
                     temp_rating = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-                    _write_plotly_png(fig_rating, temp_rating.name, width=1000, height=300, scale=1.0)
+                    _write_plotly_png(fig_rating, temp_rating.name, width=1000, height=300, scale=2.0)
                     fig_rating_path = temp_rating.name
                     temp_files.append(temp_rating.name)
             except Exception as e:
