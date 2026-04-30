@@ -1,0 +1,14 @@
+screenshot_id,title,path
+S01,Login Screen,manual_assets/screenshots/raw/S01_login_screen.png
+S02,Player Login Fields,manual_assets/screenshots/raw/S02_player_login_fields.png
+S03,Staff Login Fields,manual_assets/screenshots/raw/S03_staff_login_fields.png
+S04,Staff Dashboard Navigation,manual_assets/screenshots/raw/S04_staff_dashboard_navigation.png
+S05,Individual Development Sidebar,manual_assets/screenshots/raw/S05_individual_development_sidebar.png
+S06,General Dashboard KPIs,manual_assets/screenshots/raw/S06_general_dashboard_kpis.png
+S07,General Dashboard Chart Summary,manual_assets/screenshots/raw/S07_general_dashboard_chart_summary.png
+S08,Players Profile Selectors,manual_assets/screenshots/raw/S08_players_profile_selectors.png
+S09,Players Profile Summary,manual_assets/screenshots/raw/S09_players_profile_summary.png
+S10,Players Profile Activities,manual_assets/screenshots/raw/S10_players_profile_activities.png
+S11,Players Profile Timeline,manual_assets/screenshots/raw/S11_players_profile_timeline.png
+S12,Players Profile PDF Actions,manual_assets/screenshots/raw/S12_players_profile_pdf_actions.png
+S13,Files Current Data Download,manual_assets/screenshots/raw/S13_files_current_data_download.png

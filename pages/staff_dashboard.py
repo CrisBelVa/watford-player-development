@@ -32,6 +32,9 @@ st.title("Watford Staff Dashboard")
 
 # Navegación
 page_options = ["Dashboard", "Individual Development"]
+staff_role = str(st.session_state.get("staff_info", {}).get("role", "")).strip().lower()
+if staff_role in {"admin", "administrator"}:
+    page_options.append("Investigation")
 
 # Mostrar información del usuario en el sidebar
 with st.sidebar:
@@ -58,6 +61,8 @@ with st.sidebar:
 # Redirigir a individual_development si se selecciona esa opción
 if page_option == "Individual Development":
     st.switch_page("pages/individual_development.py")
+if page_option == "Investigation":
+    st.switch_page("pages/investigation.py")
 
 # Contenido principal del dashboard
 st.write("This is the staff dashboard where you can manage player development, view analytics, and more.")

@@ -16,6 +16,7 @@ __pycache__/
 venv/
 env/
 .env
+.venv/
 
 # Archivos de entorno
 .env
@@ -36,6 +37,7 @@ env/
 
 # Archivos de configuración local
 *.local
+service_account.json
 
 # Archivos de Streamlit
 .streamlit/
@@ -75,8 +77,11 @@ data/
 nohup.out
 *.log
 data/Individuals - Training.xlsx
+<<<<<<< HEAD
 
 # O si quieres ser específico:
 filtered_df_lucas*.xlsx
 teams_info_lucas.xlsx
 data/watford_players_login_info.xlsx
+=======
+>>>>>>> d0d0a31cd7b576da4811e6b7c39876e56c3d9035
