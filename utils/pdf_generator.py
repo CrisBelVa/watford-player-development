@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 import os
 import tempfile
+import textwrap
 import plotly.io as pio
 import numpy as np  # ← AÑADIR ESTA LÍNEA
 import plotly.graph_objects as go  # ← AÑADIR ESTA LÍNEA
@@ -127,6 +128,49 @@ class WatfordPlayerReport(FPDF):
             self.set_font('Arial', 'I', 10)
             page_text = f'Page {self.page_no() - 1}'
             self.cell(0, 10, page_text, 0, 0, 'R')
+
+    def _truncate_text(self, value, max_len):
+        text = "" if pd.isna(value) else str(value)
+        return text if len(text) <= max_len else f"{text[:max_len - 1]}..."
+
+    def _format_comparison_metric(self, value, metric_key=None, metric_type=None, use_per90_for_non_pct=False):
+        if pd.isna(value) or value == "":
+            return "-"
+
+        if metric_key in {"playerName", "teamName"}:
+            return str(value)
+
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+
+        if metric_key == "Performance Score" or metric_type == "percentage":
+            return f"{numeric_value:.1f}"
+        if metric_key in {"xG", "xA", "ps_xG"}:
+            return f"{numeric_value:.2f}"
+        if use_per90_for_non_pct and metric_key not in {"Games Played", "Games as Starter", "Minutes Played", "Age"}:
+            return f"{numeric_value:.2f}"
+        if abs(numeric_value - round(numeric_value)) < 0.05:
+            return str(int(round(numeric_value)))
+        return f"{numeric_value:.1f}"
+
+    def _short_metric_header(self, label):
+        compact = str(label).replace("Expected Goals", "xG")
+        compact = compact.replace("Assisted Shots", "A. Shots")
+        compact = compact.replace("Goal Creating Actions", "Goal Actions")
+        compact = compact.replace("Shot Creating Actions", "Shot Actions")
+        compact = compact.replace("Passes into ", "")
+        compact = compact.replace("Carries into ", "")
+        compact = compact.replace(" Final Third", " Final 3rd")
+        compact = compact.replace(" Penalty Area", " Pen. Area")
+        compact = compact.replace(" Success %", " %")
+        compact = compact.replace(" Completed %", " %")
+        compact = compact.replace(" Accuracy %", " %")
+        compact = compact.replace(" Duels %", " Duels")
+        compact = compact.replace("Performance Score", "Perf. Score")
+        compact = " ".join(compact.split())
+        return compact if len(compact) <= 16 else f"{compact[:15]}..."
 
     def _draw_cover_player_photo(self, x=188, y=48, card_w=92, card_h=122):
         # Soft shadow + white photo card for a cleaner cover look.
@@ -279,13 +323,113 @@ class WatfordPlayerReport(FPDF):
         # Player portrait card
         self._draw_cover_player_photo()
         self.set_auto_page_break(auto=True, margin=15)
+
+    def comparison_cover_page(self):
+        """
+        Special cover page for player comparison reports.
+        """
+        self.set_auto_page_break(auto=False)
+        self.add_page()
+
+        # Base background and branding strip
+        self.set_fill_color(*self.COLOR_LIGHT_BG)
+        self.rect(0, 0, 297, 210, 'F')
+        left_strip_w = 78
+        self.set_fill_color(*self.COLOR_CHARCOAL)
+        self.rect(0, 0, left_strip_w, 210, 'F')
+        self.set_fill_color(*self.COLOR_RED)
+        self.rect(left_strip_w, 0, 2.5, 210, 'F')
+
+        # Logo
+        try:
+            if os.path.exists(self.logo_path):
+                self.image(self.logo_path, x=14, y=14, w=48)
+        except:
+            pass
+
+        # Left strip text
+        self.set_xy(12, 88)
+        self.set_font('Arial', 'B', 13)
+        self.set_text_color(*self.COLOR_WHITE)
+        self.multi_cell(left_strip_w - 24, 7, 'PLAYER\nCOMPARISON\nREPORT', 0, 'L')
+        self.set_xy(12, 186)
+        self.set_font('Arial', '', 9)
+        self.set_text_color(188, 194, 201)
+        self.cell(left_strip_w - 24, 6, 'Watford FC Analytics', 0, 0, 'L')
+
+        # Title block (right side)
+        content_x = left_strip_w + 12
+        self.set_xy(content_x, 24)
+        self.set_font('Arial', '', 11)
+        self.set_text_color(*self.COLOR_MUTED_TEXT)
+        self.cell(96, 6, 'Watford FC Academy', 0, 1, 'L')
+        self.set_x(content_x)
+        
+        self.set_font('Arial', 'B', 28)
+        self.set_text_color(*self.COLOR_CHARCOAL)
+        self.cell(102, 13, 'PLAYER COMPARISON', 0, 1, 'L')
+        self.set_x(content_x)
+        self.set_font('Arial', '', 15)
+        self.set_text_color(*self.COLOR_MUTED_TEXT)
+        self.cell(105, 10, f'Competition: Championship', 0, 1, 'L')
+
+        # Context values for compact info panel
+        season = self.cover_filters.get('season')
+        season_text = str(season).strip() if season else "All seasons"
+        start_date = self.cover_filters.get('delta_start_date', self.cover_filters.get('start_date'))
+        end_date = self.cover_filters.get('delta_end_date', self.cover_filters.get('end_date'))
+        period_text = f"{start_date} - {end_date}" if (start_date and end_date) else "Full range"
+
+        # Compact info panel
+        info_x = content_x
+        info_y = 84
+        info_w = 88
+        info_h = 44
+        self.set_fill_color(236, 239, 243)
+        self.rect(info_x, info_y, info_w, info_h, 'F')
+        self.set_draw_color(214, 219, 225)
+        self.set_line_width(0.5)
+        self.rect(info_x, info_y, info_w, info_h, 'D')
+
+        info_rows = [
+            ("Season", season_text),
+            ("Period", period_text),
+            ("Position", self.cover_position or "Multiple"),
+        ]
+        y_cursor = info_y + 6
+        for label, value in info_rows:
+            self.set_xy(info_x + 3, y_cursor)
+            self.set_font('Arial', 'B', 8)
+            self.set_text_color(96, 104, 114)
+            self.cell(22, 4.5, f"{label}:", 0, 0, 'L')
+
+            self.set_font('Arial', '', 8)
+            self.set_text_color(56, 62, 70)
+            self.cell(info_w - 28, 4.5, str(value), 0, 1, 'L')
+            y_cursor += 12
+
+        # Subtle separators
+        self.set_draw_color(215, 220, 226)
+        self.set_line_width(0.6)
+        self.line(content_x, 78, 178, 78)
+        self.line(content_x, 146, 178, 146)
+
+        # Generated date
+        generated_date = datetime.now().strftime("%B %d, %Y")
+        self.set_xy(content_x, 186)
+        self.set_font('Arial', '', 10)
+        self.set_text_color(*self.COLOR_MUTED_TEXT)
+        self.cell(120, 6, f'Generated {generated_date}', 0, 0, 'L')
+
+        # Player portrait card
+        self._draw_cover_player_photo()
+        self.set_auto_page_break(auto=True, margin=15)
     
     def filters_page(self, filters_data):
         """
         Página 2: Filtros aplicados (LETRAS BLANCAS)
         - Season
         - Date Range
-        - Matches seleccionados
         """
         self.add_page()
         
@@ -345,58 +489,7 @@ class WatfordPlayerReport(FPDF):
         if isinstance(ref_end, pd.Timestamp):
             ref_end = ref_end.strftime('%Y-%m-%d')
         self.cell(0, 10, f'{ref_start} to {ref_end}', 0, 1, 'L')
-        self.ln(8)
-        
-        # Selected Matches (BLANCO)
-        self.set_font('Arial', 'B', 14)
-        self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
-        self.cell(0, 10, 'Selected Matches:', 0, 1, 'L')
-        self.ln(3)
-        
-        matches = filters_data.get('selected_matches', [])
-        if matches:
-            self.set_font('Arial', '', 11)
-            self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
-            
-            # Crear tabla de matches (2 columnas) con paginación automática
-            col_width = 135
-            row_height = 8
-            page_break_y = 175
-            clean_matches = [str(m) for m in matches if str(m).strip()]
-
-            for idx in range(0, len(clean_matches), 2):
-                # Salto de página si no hay espacio para la siguiente fila
-                if self.get_y() + row_height > page_break_y:
-                    self.add_page()
-                    self.set_font('Arial', 'B', 20)
-                    self.set_text_color(*self.COLOR_WHITE)
-                    self.cell(0, 12, 'Filters Applied (continued)', 0, 1, 'L')
-                    self.ln(2)
-                    self.set_font('Arial', 'B', 14)
-                    self.set_text_color(*self.COLOR_WHITE)
-                    self.cell(0, 10, 'Selected Matches (continued):', 0, 1, 'L')
-                    self.ln(2)
-                    self.set_font('Arial', '', 11)
-                    self.set_text_color(*self.COLOR_WHITE)
-
-                x_pos = self.get_x()
-                y_pos = self.get_y()
-
-                # Primera columna
-                self.set_fill_color(60, 60, 60)  # ← GRIS OSCURO
-                self.cell(col_width, row_height, f'  {clean_matches[idx]}', 1, 0, 'L', True)
-
-                # Segunda columna (si existe)
-                if idx + 1 < len(clean_matches):
-                    self.set_xy(x_pos + col_width + 2, y_pos)
-                    self.set_fill_color(60, 60, 60)
-                    self.cell(col_width, row_height, f'  {clean_matches[idx + 1]}', 1, 0, 'L', True)
-
-                self.set_xy(x_pos, y_pos + row_height)
-        else:
-            self.set_font('Arial', 'I', 12)
-            self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
-            self.cell(0, 10, 'No matches selected', 0, 1, 'L')
+        self.ln(4)
     
     def draw_info_card(self, x, y, width, height, label, value):
         """Dibuja una card de información personal (rosa)"""
@@ -450,6 +543,40 @@ class WatfordPlayerReport(FPDF):
         
         delta_text = f'{arrow} {delta:+.1f} ({delta_pct:+.1f}%)'
         self.cell(width, 4, delta_text, 0, 0, 'C')
+
+    def _build_metric_row_layout(self, metric_count):
+        if metric_count <= 0:
+            return []
+        if metric_count <= 3:
+            return [metric_count]
+
+        target_rows = 2
+        if metric_count > 6:
+            target_rows = 3
+        if metric_count > 10:
+            target_rows = 4
+
+        base = metric_count // target_rows
+        remainder = metric_count % target_rows
+        layout = []
+        for row_idx in range(target_rows):
+            row_size = base + (1 if row_idx < remainder else 0)
+            if row_size > 0:
+                layout.append(row_size)
+        return layout
+
+    def _metric_card_title_lines(self, title, width):
+        approx_chars = max(12, int(width / 3.3))
+        wrapped = textwrap.wrap(str(title), width=approx_chars)
+        if not wrapped:
+            return [""]
+        if len(wrapped) > 2:
+            wrapped = wrapped[:2]
+            if len(wrapped[-1]) > 3:
+                wrapped[-1] = wrapped[-1][:-3].rstrip() + "..."
+            else:
+                wrapped[-1] = wrapped[-1] + "..."
+        return wrapped
     
     def metrics_page(self, player_info, player_position, kpis_data):
         """
@@ -490,70 +617,98 @@ class WatfordPlayerReport(FPDF):
         self.set_font('Arial', 'I', 11)
         self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
         self.cell(0, 6, f'Showing Metrics for position: {player_position}', 0, 1, 'L')
-        self.ln(1)
-        
-        # ===== CARDS DE MÉTRICAS KPI (5 POR FILA, LETRAS BLANCAS) =====
-        kpi_card_width = 54  # ← MÁS PEQUEÑO (5 por fila)
-        kpi_card_height = 22  # ← REDUCIDO
-        kpi_spacing = 2
-        kpis_per_row = 5  # ← 5 POR FILA (antes 4)
-        
-        kpi_start_x = 15
+        self.ln(4)
+
+        content_left = 15
+        content_width = 267
+        row_gap = 5
         kpi_start_y = self.get_y()
-        
-        for i, kpi_item in enumerate(kpis_data):
-            row = i // kpis_per_row
-            col = i % kpis_per_row
-            
-            x = kpi_start_x + (kpi_card_width + kpi_spacing) * col
-            y = kpi_start_y + (kpi_card_height + kpi_spacing) * row
-            
-            self.draw_metric_card_white_text(  # ← NUEVA FUNCIÓN
-                x, y, kpi_card_width, kpi_card_height,
-                kpi_item['title'],
-                kpi_item['value'],
-                kpi_item['delta'],
-                kpi_item['delta_pct']
-        )
+        row_layout = self._build_metric_row_layout(len(kpis_data))
+        rows_count = max(1, len(row_layout))
+        available_height = max(78, 186 - kpi_start_y)
+        total_gap_height = row_gap * max(0, rows_count - 1)
+        kpi_card_height = min(32, max(16, (available_height - total_gap_height) / rows_count))
+
+        metric_index = 0
+        current_y = kpi_start_y
+        for items_in_row in row_layout:
+            row_spacing = 5 if items_in_row <= 3 else 4
+            card_width = (content_width - (row_spacing * max(0, items_in_row - 1))) / items_in_row
+            row_width = items_in_row * card_width + max(0, items_in_row - 1) * row_spacing
+            current_x = content_left + (content_width - row_width) / 2
+
+            for _ in range(items_in_row):
+                if metric_index >= len(kpis_data):
+                    break
+                kpi_item = kpis_data[metric_index]
+                self.draw_metric_card_white_text(
+                    current_x,
+                    current_y,
+                    card_width,
+                    kpi_card_height,
+                    kpi_item['title'],
+                    kpi_item['value'],
+                    kpi_item['delta'],
+                    kpi_item['delta_pct']
+                )
+                current_x += card_width + row_spacing
+                metric_index += 1
+
+            current_y += kpi_card_height + row_gap
             
     def draw_metric_card_white_text(self, x, y, width, height, title, value, delta, delta_pct):
         """Dibuja una card de métrica KPI con LETRAS BLANCAS"""
-        # Borde amarillo
+        # Fondo oscuro + borde Watford
+        self.set_fill_color(37, 40, 46)
+        self.rect(x, y, width, height, 'F')
         self.set_draw_color(*self.COLOR_YELLOW)
-        self.set_line_width(0.5)
+        self.set_line_width(0.6)
         self.rect(x, y, width, height)
-        
-        # Título (BLANCO)
-        self.set_xy(x, y + 2)
-        self.set_font('Arial', 'B', 8)  # ← Reducido
-        self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
-        # Truncar título si es muy largo
-        title_display = title if len(title) <= 20 else title[:18] + '...'
-        self.cell(width, 4, title_display, 0, 0, 'C')
-        
-        # Valor principal (BLANCO)
-        self.set_xy(x, y + 8)
-        self.set_font('Arial', 'B', 14)  # ← Reducido
-        self.set_text_color(*self.COLOR_WHITE)  # ← BLANCO
-        self.cell(width, 6, str(value), 0, 0, 'C')
-        
-        # Delta (COLOR según signo)
-        self.set_xy(x, y + 16)
-        self.set_font('Arial', '', 7)  # ← Reducido
-        
+
+        inner_pad_x = 4
+        title_lines = self._metric_card_title_lines(title, width - (inner_pad_x * 2))
+        title_font_size = 8 if height >= 24 and len(title_lines) == 1 else 7
+        value_font_size = 16 if width >= 84 and height >= 26 else 14 if height >= 22 else 12
+        delta_font_size = 8 if height >= 22 else 7
+        title_line_height = 3.8 if height >= 22 else 3.2
+
+        # Accent line for hierarchy
+        self.set_draw_color(111, 118, 128)
+        self.set_line_width(0.5)
+        self.line(x + 3.5, y + 4, x + width - 3.5, y + 4)
+
+        # Título
+        self.set_xy(x + inner_pad_x, y + 5.5)
+        self.set_font('Arial', 'B', title_font_size)
+        self.set_text_color(*self.COLOR_WHITE)
+        for line in title_lines:
+            self.cell(width - (inner_pad_x * 2), title_line_height, line, 0, 2, 'C')
+
+        # Valor principal
+        value_y = y + (height * 0.42)
+        self.set_xy(x + inner_pad_x, value_y)
+        self.set_font('Arial', 'B', value_font_size)
+        self.set_text_color(*self.COLOR_YELLOW)
+        self.cell(width - (inner_pad_x * 2), 6, str(value), 0, 0, 'C')
+
+        # Delta
+        delta_y = y + height - (6 if height >= 22 else 5)
+        self.set_xy(x + inner_pad_x, delta_y)
+        self.set_font('Arial', '', delta_font_size)
+
         # Color según delta
         if delta > 0:
-            self.set_text_color(0, 200, 0)  # Verde brillante
+            self.set_text_color(98, 214, 138)
             arrow = "^"
         elif delta < 0:
-            self.set_text_color(255, 80, 80)  # Rojo brillante
+            self.set_text_color(255, 118, 118)
             arrow = "v"
         else:
-            self.set_text_color(*self.COLOR_WHITE)
+            self.set_text_color(210, 214, 220)
             arrow = ''
-        
+
         delta_text = f'{arrow} {delta:+.1f} ({delta_pct:+.1f}%)'
-        self.cell(width, 3, delta_text, 0, 0, 'C')
+        self.cell(width - (inner_pad_x * 2), 3, delta_text, 0, 0, 'C')
     
     def stats_table_page(self, df, position_kpis):
         """
@@ -647,6 +802,8 @@ class WatfordPlayerReport(FPDF):
         
         # Configurar tabla
         self.set_font('Arial', '', 7)
+        self.set_draw_color(102, 108, 116)
+        self.set_line_width(0.25)
         
         # Calcular anchos de columna (ajustados a landscape)
         total_width = 277
@@ -676,8 +833,8 @@ class WatfordPlayerReport(FPDF):
             self.cell(0, title_height, f'Player Stats{suffix}', 0, 1, 'L')
             self.ln(title_spacing)
 
-            self.set_fill_color(*self.COLOR_YELLOW)
-            self.set_text_color(*self.COLOR_BLACK)
+            self.set_fill_color(28, 31, 36)
+            self.set_text_color(*self.COLOR_YELLOW)
             self.set_font('Arial', 'B', 7)
             for col_name, width in zip(df_table.columns, col_widths):
                 self.cell(width, header_height, str(col_name), 1, 0, 'C', True)
@@ -691,9 +848,9 @@ class WatfordPlayerReport(FPDF):
         for idx, row in df_table.iterrows():
             # Alternar color de fondo
             if idx % 2 == 0:
-                self.set_fill_color(60, 60, 60)  # Gris oscuro
+                self.set_fill_color(58, 63, 70)
             else:
-                self.set_fill_color(45, 45, 45)  # Gris muy oscuro
+                self.set_fill_color(46, 50, 56)
             
             for col_name, width in zip(df_table.columns, col_widths):
                 value = row[col_name]
@@ -773,7 +930,7 @@ class WatfordPlayerReport(FPDF):
                         pass
 
 
-    def player_comparison_page(self, comparison_data, comparison_kpi_table, comparison_charts):
+    def player_comparison_page(self, comparison_data, comparison_kpi_table, comparison_charts, pdf_config=None):
         """
         Páginas de Player Comparison
         
@@ -782,6 +939,10 @@ class WatfordPlayerReport(FPDF):
             comparison_kpi_table: DataFrame con KPIs comparados (playerId, playerName, teamName + KPIs)
             comparison_charts: Lista de dicts con gráficos comparativos
         """
+        pdf_config = pdf_config or {}
+        metric_labels = pdf_config.get("metric_labels", {})
+        metric_type_map = pdf_config.get("metric_type_map", {})
+        use_per90_for_non_pct = bool(pdf_config.get("use_per90_for_non_pct", False))
         self.add_page()
         
         # Título de la sección
@@ -798,126 +959,173 @@ class WatfordPlayerReport(FPDF):
         
         # ========== TABLA 1: PLAYERS SUMMARY ==========
         if not comparison_data.empty:
-            self.set_font('Arial', 'B', 11)
-            self.set_text_color(*self.COLOR_BLACK)
-            self.cell(0, 8, 'Players Summary', 0, 1, 'L')
-            self.ln(2)
-            
-            # Headers de tabla
-            col_widths = [60, 50, 20, 30, 30, 35]
-            headers = ['Player', 'Team', 'Age', 'Games', 'Starter', 'Minutes']
-            
-            self.set_fill_color(*self.COLOR_YELLOW)
-            self.set_font('Arial', 'B', 8)
-            for header, width in zip(headers, col_widths):
-                self.cell(width, 7, header, 1, 0, 'C', True)
-            self.ln()
-            
-            # Datos de tabla
-            self.set_font('Arial', '', 7)
-            display_cols = ['Player', 'Team', 'Age', 'Games Played', 'Games as Starter', 'Minutes Played']
-            
-            for idx, row in comparison_data.head(10).iterrows():
-                fill = idx % 2 == 0
-                if fill:
-                    self.set_fill_color(245, 245, 245)
-                
-                values = [
-                    str(row.get('Player', ''))[:20],  # Truncar
-                    str(row.get('Team', ''))[:15],
-                    str(row.get('Age', '')),
-                    str(row.get('Games Played', '')),
-                    str(row.get('Games as Starter', '')),
-                    str(int(row.get('Minutes Played', 0)))
-                ]
-                
-                for value, width in zip(values, col_widths):
-                    self.cell(width, 6, value, 1, 0, 'C', fill)
+            summary_columns = [
+                ("Player", "Player", 56, "L"),
+                ("Team", "Team", 42, "L"),
+                ("Age", "Age", 14, "C"),
+                ("Games Played", "Games", 20, "C"),
+                ("Games as Starter", "Starts", 20, "C"),
+                ("Minutes Played", "Minutes", 24, "C"),
+                ("% Total Minutes", "Min %", 18, "C"),
+            ]
+            if "Performance Score" in comparison_data.columns:
+                summary_columns.append(("Performance Score", "Perf. Score", 24, "C"))
+
+            def draw_summary_title():
+                self.set_font('Arial', 'B', 11)
+                self.set_text_color(*self.COLOR_WHITE)
+                self.cell(0, 8, 'Players Summary', 0, 1, 'L')
+                self.ln(2)
+
+            def draw_summary_header():
+                self.set_fill_color(24, 24, 24)
+                self.set_draw_color(252, 236, 3)
+                self.set_line_width(0.35)
+                self.set_text_color(*self.COLOR_YELLOW)
+                self.set_font('Arial', 'B', 8)
+                for _, header, width, align in summary_columns:
+                    self.cell(width, 8, header, 1, 0, align, True)
                 self.ln()
-            
-            self.ln(8)
+
+            draw_summary_title()
+            draw_summary_header()
+
+            self.set_font('Arial', '', 8)
+            for idx, row in comparison_data.iterrows():
+                if self.get_y() > 180:
+                    self.add_page()
+                    draw_summary_title()
+                    draw_summary_header()
+
+                self.set_fill_color(61, 67, 74) if idx % 2 == 0 else self.set_fill_color(47, 52, 58)
+                self.set_draw_color(88, 94, 102)
+                self.set_text_color(*self.COLOR_WHITE)
+
+                values = [
+                    self._truncate_text(row.get("Player", ""), 24),
+                    self._truncate_text(row.get("Team", ""), 18),
+                    self._format_comparison_metric(row.get("Age", ""), metric_key="Age"),
+                    self._format_comparison_metric(row.get("Games Played", ""), metric_key="Games Played"),
+                    self._format_comparison_metric(row.get("Games as Starter", ""), metric_key="Games as Starter"),
+                    self._format_comparison_metric(row.get("Minutes Played", ""), metric_key="Minutes Played"),
+                    self._format_comparison_metric(row.get("% Total Minutes", ""), metric_key="% Total Minutes", metric_type="percentage"),
+                ]
+                if "Performance Score" in comparison_data.columns:
+                    values.append(
+                        self._format_comparison_metric(
+                            row.get("Performance Score", ""),
+                            metric_key="Performance Score",
+                        )
+                    )
+
+                for (value, (_, _, width, align)) in zip(values, summary_columns):
+                    self.cell(width, 7, value, 1, 0, align, True)
+                self.ln()
+
+            self.ln(4)
         
         # ========== TABLA 2: PLAYERS STATS KPI COMPARISON ==========
         if comparison_kpi_table is not None and not comparison_kpi_table.empty:
-            self.set_font('Arial', 'B', 11)
-            self.set_text_color(*self.COLOR_BLACK)
-            self.cell(0, 8, 'Players Stats KPI Comparison', 0, 1, 'L')
-            self.ln(2)
-            
-            # Seleccionar columnas para mostrar
-            base_cols = ['playerName', 'teamName']
-            kpi_cols = [col for col in comparison_kpi_table.columns 
-                       if col not in ['playerId', 'playerName', 'teamName']]
-            
-            # Limitar a máximo 8 KPIs para que quepa en la página
-            kpi_cols = kpi_cols[:8]
-            display_cols = base_cols + kpi_cols
-            
-            # Calcular anchos de columna dinámicamente
-            total_width = 277
-            name_width = 50
-            team_width = 45
-            remaining = total_width - name_width - team_width
-            kpi_width = remaining / len(kpi_cols) if kpi_cols else 20
-            
-            col_widths = [name_width, team_width] + [kpi_width] * len(kpi_cols)
-            
-            # Labels cortos para headers
-            short_labels = {
-                'playerName': 'Player',
-                'teamName': 'Team',
-                'pass_completion_pct': 'Pass%',
-                'key_passes': 'KeyP',
-                'aerial_duel_pct': 'Aer%',
-                'take_on_success_pct': 'Drib%',
-                'goal_creating_actions': 'GCA',
-                'shot_creating_actions': 'SCA',
-                'shots_on_target_pct': 'Shot%',
-                'passes_into_penalty_area': 'PassPA',
-                'carries_into_final_third': 'CarF3',
-                'carries_into_penalty_area': 'CarPA',
-                'goals': 'G',
-                'assists': 'A',
-                'xG': 'xG',
-                'xA': 'AShot',
-            }
-            
-            # Headers
-            self.set_fill_color(*self.COLOR_YELLOW)
-            self.set_font('Arial', 'B', 7)
-            for col, width in zip(display_cols, col_widths):
-                label = short_labels.get(col, col[:6])
-                self.cell(width, 7, label, 1, 0, 'C', True)
-            self.ln()
-            
-            # Datos
-            self.set_font('Arial', '', 6)
-            for idx, row in comparison_kpi_table.head(10).iterrows():
-                fill = idx % 2 == 0
-                if fill:
-                    self.set_fill_color(245, 245, 245)
-                
-                for col, width in zip(display_cols, col_widths):
-                    value = row.get(col, '')
-                    
-                    # Formatear valores
-                    if col in base_cols:
-                        # Nombres: truncar
-                        value_str = str(value)[:15] if col == 'playerName' else str(value)[:12]
-                    elif isinstance(value, (int, float)):
-                        # Números: formatear según tipo
-                        if 'pct' in col or '%' in col:
-                            value_str = f"{value:.1f}"
-                        elif col in ['xG', 'xA']:
-                            value_str = f"{value:.2f}"
+            selected_kpis = [
+                col for col in pdf_config.get("selected_kpis", [])
+                if col in comparison_kpi_table.columns
+            ]
+            metric_columns = []
+            if "Performance Score" in comparison_kpi_table.columns:
+                metric_columns.append("Performance Score")
+            metric_columns.extend(selected_kpis)
+            if not metric_columns:
+                metric_columns = [
+                    col for col in comparison_kpi_table.columns
+                    if col not in {"playerId", "playerName", "teamName"}
+                ]
+
+            max_metrics_per_table = 6
+            metric_chunks = [
+                metric_columns[i:i + max_metrics_per_table]
+                for i in range(0, len(metric_columns), max_metrics_per_table)
+            ]
+
+            for chunk_idx, metric_chunk in enumerate(metric_chunks, start=1):
+                if chunk_idx > 1:
+                    self.add_page()
+
+                title = "Players Stats KPI Comparison"
+                if len(metric_chunks) > 1:
+                    title = f"{title} ({chunk_idx}/{len(metric_chunks)})"
+
+                self.set_font('Arial', 'B', 11)
+                self.set_text_color(*self.COLOR_WHITE)
+                self.cell(0, 8, title, 0, 1, 'L')
+                self.ln(1)
+                self.set_font('Arial', '', 8)
+                self.set_text_color(*self.COLOR_GRAY)
+                subtitle = "Selected KPIs shown with the same values used in the dashboard."
+                if use_per90_for_non_pct:
+                    subtitle = "Selected KPIs shown with dashboard values (per 90 for non-% metrics)."
+                self.cell(0, 6, subtitle, 0, 1, 'L')
+                self.ln(1)
+
+                base_columns = [
+                    ("playerName", "Player", 56, "L"),
+                    ("teamName", "Team", 40, "L"),
+                ]
+                remaining_width = 277 - sum(width for _, _, width, _ in base_columns)
+                metric_width = remaining_width / max(len(metric_chunk), 1)
+                metric_defs = [
+                    (
+                        metric_key,
+                        self._short_metric_header(metric_labels.get(metric_key, metric_key.replace("_", " ").title())),
+                        metric_width,
+                        "C",
+                    )
+                    for metric_key in metric_chunk
+                ]
+                display_columns = base_columns + metric_defs
+
+                def draw_kpi_header():
+                    self.set_fill_color(24, 24, 24)
+                    self.set_draw_color(252, 236, 3)
+                    self.set_line_width(0.35)
+                    self.set_text_color(*self.COLOR_YELLOW)
+                    self.set_font('Arial', 'B', 7)
+                    for _, header, width, align in display_columns:
+                        self.cell(width, 8, header, 1, 0, align, True)
+                    self.ln()
+
+                draw_kpi_header()
+                self.set_font('Arial', '', 7)
+
+                for idx, row in comparison_kpi_table.iterrows():
+                    if self.get_y() > 180:
+                        self.add_page()
+                        self.set_font('Arial', 'B', 11)
+                        self.set_text_color(*self.COLOR_WHITE)
+                        self.cell(0, 8, title, 0, 1, 'L')
+                        self.ln(3)
+                        draw_kpi_header()
+                        self.set_font('Arial', '', 7)
+
+                    self.set_fill_color(61, 67, 74) if idx % 2 == 0 else self.set_fill_color(47, 52, 58)
+                    self.set_draw_color(88, 94, 102)
+                    self.set_text_color(*self.COLOR_WHITE)
+
+                    for metric_key, _, width, align in display_columns:
+                        raw_value = row.get(metric_key, "")
+                        if metric_key == "playerName":
+                            value_str = self._truncate_text(raw_value, 22)
+                        elif metric_key == "teamName":
+                            value_str = self._truncate_text(raw_value, 16)
                         else:
-                            value_str = f"{int(value)}"
-                    else:
-                        value_str = str(value)
-                    
-                    self.cell(width, 6, value_str, 1, 0, 'C', fill)
-                self.ln()
-            
+                            value_str = self._format_comparison_metric(
+                                raw_value,
+                                metric_key=metric_key,
+                                metric_type=metric_type_map.get(metric_key),
+                                use_per90_for_non_pct=use_per90_for_non_pct,
+                            )
+                        self.cell(width, 7, value_str, 1, 0, align, True)
+                    self.ln()
+
             self.ln(5)
         
         # ========== GRÁFICOS COMPARATIVOS (2 POR PÁGINA) ==========
@@ -1107,6 +1315,45 @@ def generate_player_report(
     # 6. Player Comparison (si se proporcionan datos)
     if comparison_data is not None and not comparison_data.empty:
         pdf.player_comparison_page(comparison_data, comparison_kpi_table, comparison_charts or [])
+
+    raw_pdf = pdf.output(dest='S')
+    if isinstance(raw_pdf, (bytes, bytearray)):
+        return bytes(raw_pdf)
+    return str(raw_pdf).encode('latin-1', errors='replace')
+
+def generate_comparison_report(
+    comparison_data,
+    comparison_kpi_table,
+    comparison_charts,
+    pdf_config=None,
+    filters_data=None,
+    logo_path="img/watford_logo.png",
+    player_position=None,
+    background_image_path=None,
+    player_photo_path=None,
+):
+    """
+    Genera un reporte PDF específico para comparación de jugadores.
+    """
+    # Crear PDF
+    pdf = WatfordPlayerReport("Comparison Report", logo_path, background_image_path, player_photo_path)
+    pdf.cover_position = player_position
+    pdf.cover_filters = filters_data if isinstance(filters_data, dict) else {}
+    
+    # 1. Portada de comparación
+    pdf.comparison_cover_page()
+    
+    # 2. Página de filtros
+    pdf.filters_page(filters_data)
+    
+    # 3. Páginas de comparación
+    if comparison_data is not None and not comparison_data.empty:
+        pdf.player_comparison_page(
+            comparison_data,
+            comparison_kpi_table,
+            comparison_charts or [],
+            pdf_config=pdf_config or {},
+        )
     
     raw_pdf = pdf.output(dest='S')
     if isinstance(raw_pdf, (bytes, bytearray)):
@@ -1747,7 +1994,7 @@ def generate_individual_development_report_landscape(
             self.set_font('Arial', '', 10)
             self.set_text_color(*self.COLOR_MUTED_TEXT)
             self.cell(0, 6, 'Activity distribution and detailed log', 0, 1, 'L')
-            self.ln(2)
+            self.ln(1)
             
             if fig_comparison_path and os.path.exists(fig_comparison_path):
                 try:
@@ -1776,7 +2023,7 @@ def generate_individual_development_report_landscape(
             else:
                 self.set_y(50)
             
-            self.ln(5)
+            self.ln(3)
             self._activities_table_paginated(df_actividades)
         
         def _activities_table_paginated(self, df_actividades):

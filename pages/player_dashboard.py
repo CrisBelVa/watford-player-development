@@ -418,6 +418,33 @@ def resolve_current_player(is_staff: bool) -> Tuple[str, str]:
 # >>> Call the resolver BEFORE using player_name <<<
 player_id, player_name = resolve_current_player(is_staff)
 
+player_dashboard_signature_key = "player_dashboard_active_player_signature"
+current_player_signature = str(player_id).strip()
+previous_player_signature = st.session_state.get(player_dashboard_signature_key)
+if previous_player_signature != current_player_signature:
+    reset_keys_on_player_change = [
+        "selected_match_ids_kpi",
+        "selected_match_ids_trends",
+        "match_search_kpi",
+        "match_search_trends",
+        "dashboard_min_minutes_filter",
+        "selected_team_names",
+        "comparison_position_profiles",
+        "comparison_max_players_to_show",
+        "comparison_min_minutes_pct",
+        "comparison_use_per90_non_pct",
+        "selected_kpis_main",
+        "selected_kpis_main_signature",
+    ]
+    for key in reset_keys_on_player_change:
+        st.session_state.pop(key, None)
+
+    for key in list(st.session_state.keys()):
+        if key.startswith("match_kpi_") or key.startswith("trends_match_"):
+            st.session_state.pop(key, None)
+
+    st.session_state[player_dashboard_signature_key] = current_player_signature
+
 # For players: hide multipage nav links and show a Logout button
 if not is_staff:
     st.markdown(
@@ -759,6 +786,25 @@ for kpi in position_default_kpis + available_kpis:
 
 if not all_kpi_options:
     all_kpi_options = [k for k in metric_type_map.keys() if k in metrics_summary.columns]
+
+kpi_state_signature = {
+    "player_id": str(player_id),
+    "player_position": str(player_position or ""),
+}
+kpi_signature_session_key = "selected_kpis_main_signature"
+kpi_multiselect_session_key = "selected_kpis_main"
+previous_kpi_signature = st.session_state.get(kpi_signature_session_key)
+
+player_or_position_changed = previous_kpi_signature != kpi_state_signature
+if player_or_position_changed:
+    st.session_state[kpi_multiselect_session_key] = list(position_default_kpis)
+    st.session_state[kpi_signature_session_key] = kpi_state_signature
+else:
+    current_kpis_state = st.session_state.get(kpi_multiselect_session_key)
+    if current_kpis_state is not None:
+        valid_current_kpis = [k for k in current_kpis_state if k in all_kpi_options]
+        if valid_current_kpis != list(current_kpis_state):
+            st.session_state[kpi_multiselect_session_key] = valid_current_kpis
 
 
 # ---------------------------
@@ -1297,7 +1343,7 @@ selected_kpis = st.multiselect(
     options=all_kpi_options,
     default=position_default_kpis,
     format_func=lambda k: metric_labels.get(k, k.replace("_", " ").title()),
-    key="selected_kpis_main",
+    key=kpi_multiselect_session_key,
 )
 st.caption("Default KPIs for the player position are preselected. You can add or remove any available KPI.")
 if not selected_kpis:
@@ -2258,6 +2304,7 @@ elif section == "Player Card":
         selected_kpis=selected_kpis,
         metric_labels=metric_labels,
         metric_type_map=metric_type_map,
+        percentage_formula_map=percentage_formula_map,
         filtered_df=filtered_df,
         event_data=event_data,
         attach_minutes_reference=attach_minutes_reference,
@@ -2279,6 +2326,33 @@ elif section == "Player Comparison":
     COMPETITION = "championship"
 
     st.info(f"Top Players in the Competition – **{player_position}** (Season: {season_label})")
+
+    comparison_filter_explanation = [
+        "Only matches inside the current season and date range are considered.",
+        "Only players from the selected comparison teams are considered.",
+        "Comparison players are evaluated by position using minutes played in each role, excluding `Sub` rows.",
+        "Primary position = the role with the highest share of non-sub minutes in the filtered scope.",
+        "A secondary position only counts if it reaches at least `25%` of the player's non-sub minutes and at least `30` minutes in that role.",
+        "This prevents one-off appearances from wrongly classifying a player into another comparison bucket.",
+        "The selected player keeps his own filtered matches; the position profile filter applies only to the comparison pool.",
+        "The minimum minutes filter in the player selector is applied after position eligibility is calculated.",
+    ]
+
+    if hasattr(st, "dialog"):
+        @st.dialog("How Comparison Filters Work")
+        def show_comparison_filters_help():
+            st.markdown("These rules decide which players appear in the comparison selector:")
+            for item in comparison_filter_explanation:
+                st.markdown(f"- {item}")
+
+        _, comparison_help_col = st.columns([6, 2])
+        with comparison_help_col:
+            if st.button("ℹ️ Comparison filter info", use_container_width=True, key="comparison_filters_info_btn"):
+                show_comparison_filters_help()
+    else:
+        with st.expander("ℹ️ Comparison filter info", expanded=False):
+            for item in comparison_filter_explanation:
+                st.markdown(f"- {item}")
 
     # ---------- Normalize team_data schema ----------
     team_data_cmp = team_data.rename(columns={
@@ -2602,8 +2676,9 @@ elif section == "Player Comparison":
         st.warning("⚠️ No startDate merged from match_data — check matchId alignment or competition filter.")
 
     # Apply selected teams and position profiles for comparison players only.
-    # For comparison players, infer a primary position from non-Sub rows.
-    # Then keep all their matches (including Sub) once they qualify.
+    # Position eligibility is based on minutes-weighted position shares inside the
+    # current comparison scope, so a one-off appearance in a role does not
+    # incorrectly reclassify the player for comparison.
     logged_player_id = str(player_id)
     selected_team_ids_set = set(pd.to_numeric(pd.Series(selected_team_ids), errors="coerce").dropna().astype("Int64").tolist())
     players_scope_all = players_full[players_full["teamId"].isin(selected_team_ids_set)].copy()
@@ -2620,28 +2695,72 @@ elif section == "Player Comparison":
     comparison_scope = players_scope_all[players_scope_all["playerId"].astype(str) != logged_player_id].copy()
 
     non_sub_scope = comparison_scope[~comparison_scope["position"].isin({"", "SUB", "NONE", "NAN"})].copy()
+    position_share_threshold_pct = 25.0
+    position_minutes_floor = 30.0
+
     if not non_sub_scope.empty:
-        inferred_primary_pos = (
-            non_sub_scope.groupby("playerId")["position"]
-            .agg(lambda s: s.value_counts().index[0] if not s.empty else "")
-            .reset_index(name="primary_position")
+        non_sub_scope["minutesPlayed"] = pd.to_numeric(
+            non_sub_scope["minutesPlayed"], errors="coerce"
+        ).fillna(0.0)
+        non_sub_scope["minutesPlayed"] = non_sub_scope["minutesPlayed"].clip(lower=0.0)
+
+        position_minutes_by_player = (
+            non_sub_scope.groupby(["playerId", "position"], as_index=False)["minutesPlayed"]
+            .sum()
+            .rename(columns={"minutesPlayed": "position_minutes"})
         )
+        total_non_sub_minutes = (
+            position_minutes_by_player.groupby("playerId", as_index=False)["position_minutes"]
+            .sum()
+            .rename(columns={"position_minutes": "total_position_minutes"})
+        )
+        position_profile_df = position_minutes_by_player.merge(
+            total_non_sub_minutes,
+            on="playerId",
+            how="left",
+        )
+        position_profile_df["position_share_pct"] = np.where(
+            position_profile_df["total_position_minutes"] > 0,
+            (position_profile_df["position_minutes"] / position_profile_df["total_position_minutes"]) * 100.0,
+            0.0,
+        )
+        position_profile_df["position_share_pct"] = pd.to_numeric(
+            position_profile_df["position_share_pct"], errors="coerce"
+        ).fillna(0.0)
+
+        primary_position_df = (
+            position_profile_df.sort_values(
+                by=["playerId", "position_share_pct", "position_minutes", "position"],
+                ascending=[True, False, False, True],
+            )
+            .drop_duplicates(subset=["playerId"], keep="first")
+            .rename(columns={"position": "primary_position"})
+        )
+
+        significant_positions_df = position_profile_df[
+            (position_profile_df["position_share_pct"] >= float(position_share_threshold_pct))
+            & (position_profile_df["position_minutes"] >= float(position_minutes_floor))
+        ].copy()
+        significant_positions_df = significant_positions_df.merge(
+            primary_position_df[["playerId", "primary_position"]],
+            on="playerId",
+            how="left",
+        )
+
+        eligible_comp_ids = set(
+            significant_positions_df[
+                significant_positions_df["position"].isin(position_codes_set)
+            ]["playerId"].tolist()
+        )
+        primary_position_eligible_ids = set(
+            primary_position_df[
+                primary_position_df["primary_position"].isin(position_codes_set)
+                & (pd.to_numeric(primary_position_df["position_minutes"], errors="coerce").fillna(0.0) >= float(position_minutes_floor))
+            ]["playerId"].tolist()
+        )
+        eligible_comp_ids = eligible_comp_ids | primary_position_eligible_ids
     else:
-        inferred_primary_pos = pd.DataFrame(columns=["playerId", "primary_position"])
-
-    eligible_comp_ids = set(
-        inferred_primary_pos[
-            inferred_primary_pos["primary_position"].isin(position_codes_set)
-        ]["playerId"].tolist()
-    )
-
-    # Fallback for players with no reliable non-Sub history in scope.
-    fallback_comp_ids = set(
-        comparison_scope[
-            comparison_scope["position"].isin(position_codes_set)
-        ]["playerId"].tolist()
-    )
-    eligible_comp_ids = eligible_comp_ids | fallback_comp_ids
+        eligible_comp_ids = set()
 
     comparison_players_rows = comparison_scope[
         comparison_scope["playerId"].isin(eligible_comp_ids)
@@ -3070,9 +3189,13 @@ elif section == "Player Comparison":
             "Performance Score is the mean of all selected KPIs with equal weight, using totals for non-% KPIs "
             "and weighted ratios for % KPIs. The dashed red line shows the mean of selected players."
         )
-    performance_chart_data = summary_metrics_df[["playerName", "Performance Score"]].copy().sort_values(
-        by="Performance Score",
-        ascending=False,
+    performance_chart_data = summary_metrics_df[["playerName", "Performance Score"]].copy()
+    performance_chart_data["_is_reference_player"] = (
+        performance_chart_data["playerName"] == player_name
+    ).astype(int)
+    performance_chart_data = performance_chart_data.sort_values(
+        by=["Performance Score", "_is_reference_player", "playerName"],
+        ascending=[False, False, True],
     )
     performance_chart_data["color"] = performance_chart_data["playerName"].apply(
         lambda name: "#FFD700" if name == player_name else "#d3d3d3"
@@ -3097,8 +3220,13 @@ elif section == "Player Comparison":
         annotation_position="top right",
     )
     fig_perf.update_yaxes(range=[0, 100])
+    fig_perf.update_xaxes(
+        categoryorder="array",
+        categoryarray=performance_chart_data["playerName"].tolist(),
+    )
     fig_perf.update_layout(xaxis_title="Player", yaxis_title="Performance Score", showlegend=False)
     st.plotly_chart(fig_perf, use_container_width=True)
+    comparison_charts_pdf = [{'fig': fig_perf, 'kpi_name': 'Performance Score'}]
 
     # --- Charts ---
     if use_per90_for_non_pct:
@@ -3115,7 +3243,12 @@ elif section == "Player Comparison":
         if use_per90_for_non_pct and not is_percentage_metric:
             kpi_display_label = f"{kpi_display_label} (per 90)"
 
-        chart_data = summary_metrics_df[["playerName", kpi]].copy().sort_values(by=kpi, ascending=False)
+        chart_data = summary_metrics_df[["playerName", kpi]].copy()
+        chart_data["_is_reference_player"] = (chart_data["playerName"] == player_name).astype(int)
+        chart_data = chart_data.sort_values(
+            by=[kpi, "_is_reference_player", "playerName"],
+            ascending=[False, False, True],
+        )
         chart_data["color"] = chart_data["playerName"].apply(
             lambda name: "#FFD700" if name == player_name else "#d3d3d3"
         )
@@ -3149,8 +3282,159 @@ elif section == "Player Comparison":
         if is_percentage_metric:
             fig.update_yaxes(range=[0, 100])
 
+        fig.update_xaxes(
+            categoryorder="array",
+            categoryarray=chart_data["playerName"].tolist(),
+        )
         fig.update_layout(xaxis_title="Player", yaxis_title=kpi_display_label, showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
+        comparison_charts_pdf.append({'fig': fig, 'kpi_name': kpi_display_label})
 
     st.expander("### Players Stats KPI Comparison")
     st.dataframe(summary_metrics_df, use_container_width=True)
+
+    # --- PDF Generation for Comparison ---
+    st.markdown("---")
+    st.subheader("📊 Export Comparison Report")
+    
+    generating_key_cmp = "player_comparison_pdf_generating"
+    auto_download_key_cmp = "player_comparison_pdf_auto_download_pending"
+    
+    with st.expander("PDF Options"):
+        cover_player_key = build_cover_player_key(player_name=player_name, player_id=player_id)
+        cover_session_key = f"player_report_cover_photo_path_{player_id}"
+
+        if cover_session_key not in st.session_state:
+            history = list_cover_photos(base_dir=BASE_DIR, player_key=cover_player_key)
+            st.session_state[cover_session_key] = history[0]["path"] if history else None
+
+        if st.button("Manage player cover photo", key="manage_comparison_cover_photo"):
+            _pdf_cover_photo_dialog(
+                player_key=cover_player_key,
+                player_label=player_name,
+                session_key=cover_session_key,
+                key_prefix=f"comparison_pdf_cover_{player_id}",
+            )
+
+        selected_cover_photo_path = st.session_state.get(cover_session_key)
+        if selected_cover_photo_path and os.path.exists(selected_cover_photo_path):
+            st.image(selected_cover_photo_path, width=120, caption="Cover Photo")
+        else:
+            st.caption("No cover photo selected.")
+
+    if st.button(
+        "Generate & Download Comparison PDF",
+        key="generate_comparison_pdf_btn",
+        type="primary",
+        disabled=st.session_state.get(generating_key_cmp, False),
+    ):
+        st.session_state[generating_key_cmp] = True
+        st.session_state[auto_download_key_cmp] = True
+        st.rerun()
+
+    if st.session_state.get(generating_key_cmp, False):
+        overlay_placeholder = st.empty()
+        overlay_placeholder.markdown(
+            """
+            <style>
+              .pdf-generation-overlay {
+                position: fixed;
+                inset: 0;
+                background: rgba(0, 0, 0, 0.45);
+                z-index: 2147483000;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                pointer-events: all;
+              }
+              .pdf-generation-overlay-card {
+                background: #111;
+                color: #fff;
+                padding: 1rem 1.25rem;
+                border-radius: 12px;
+                font-weight: 600;
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+              }
+            </style>
+            <div class="pdf-generation-overlay">
+              <div class="pdf-generation-overlay-card">Generating Comparison PDF... Please wait.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        try:
+            try:
+                from utils.pdf_generator import generate_comparison_report
+            except Exception as e:
+                st.error(f"Could not load PDF generator: {e}")
+            else:
+                filters_payload = {
+                    "season": season_label,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "position_profiles": selected_position_profiles,
+                }
+                comparison_pdf_config = {
+                    "selected_kpis": list(selected_kpis),
+                    "metric_labels": {k: metric_labels.get(k, k) for k in selected_kpis},
+                    "metric_type_map": {k: metric_type_map.get(k, "aggregate") for k in selected_kpis},
+                    "use_per90_for_non_pct": bool(use_per90_for_non_pct),
+                }
+                
+                pdf_bytes = generate_comparison_report(
+                    comparison_data=summary_display,
+                    comparison_kpi_table=summary_metrics_df,
+                    comparison_charts=comparison_charts_pdf,
+                    pdf_config=comparison_pdf_config,
+                    filters_data=filters_payload,
+                    logo_path=LOGO_PATH,
+                    player_position=player_position,
+                    background_image_path=BACKGROUND_COVER_PATH if os.path.exists(BACKGROUND_COVER_PATH) else None,
+                    player_photo_path=selected_cover_photo_path if (selected_cover_photo_path and os.path.exists(selected_cover_photo_path)) else None,
+                )
+                
+                if not pdf_bytes:
+                    raise ValueError("Generated PDF is empty.")
+
+                safe_name = _safe_pdf_filename(player_name)
+                file_name = f"{safe_name}_comparison_report.pdf"
+                st.session_state["comparison_report_pdf_bytes"] = pdf_bytes
+                st.session_state["comparison_report_pdf_name"] = file_name
+                st.success("PDF generated.")
+        except Exception as e:
+            st.session_state[auto_download_key_cmp] = False
+            st.error(f"Failed to generate PDF: {e}")
+        finally:
+            st.session_state[generating_key_cmp] = False
+            overlay_placeholder.empty()
+
+    if st.session_state.get(auto_download_key_cmp, False) and st.session_state.get("comparison_report_pdf_bytes"):
+        pdf_b64 = base64.b64encode(st.session_state["comparison_report_pdf_bytes"]).decode("utf-8")
+        file_name = st.session_state.get("comparison_report_pdf_name", "comparison_report.pdf")
+        components.html(
+            f"""
+            <script>
+              (function() {{
+                const a = document.createElement('a');
+                a.href = 'data:application/pdf;base64,{pdf_b64}';
+                a.download = '{file_name}';
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+              }})();
+            </script>
+            """,
+            height=0
+        )
+        st.session_state[auto_download_key_cmp] = False
+        st.caption("If download does not start automatically, use the fallback button below.")
+
+    if st.session_state.get("comparison_report_pdf_bytes"):
+        st.download_button(
+            "Download Comparison PDF (fallback)",
+            data=st.session_state["comparison_report_pdf_bytes"],
+            file_name=st.session_state.get("comparison_report_pdf_name", "comparison_report.pdf"),
+            mime="application/pdf",
+            key="download_comparison_report_pdf",
+        )
