@@ -75,3 +75,8 @@ data/
 nohup.out
 *.log
 data/Individuals - Training.xlsx
+
+# O si quieres ser específico:
+filtered_df_lucas*.xlsx
+teams_info_lucas.xlsx
+data/watford_players_login_info.xlsx
