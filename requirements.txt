@@ -12,3 +12,8 @@ python-dotenv
 pdfkit
 wkhtmltopdf
 openpyxl
+requests
+beautifulsoup4
+selenium
+webdriver-manager
+fpdf2

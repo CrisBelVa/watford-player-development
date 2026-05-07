@@ -1,0 +1,26 @@
+{
+  "default_source": "whoscored_championship",
+  "sources": {
+    "whoscored_championship": {
+      "enabled": true,
+      "family": "whoscored",
+      "fixtures_url": "https://1xbet.whoscored.com/regions/252/tournaments/7/england-championship",
+      "season_start_month": 202408,
+      "fixtures_path": "data/pipeline/whoscored_championship/fixtures.csv",
+      "matches_dir": "data/pipeline/whoscored_championship/matches",
+      "parsed_output_dir": "data/pipeline/whoscored_championship/matches/output",
+      "state_path": "data/pipeline/whoscored_championship/state.csv"
+    },
+    "scoresway_championship": {
+      "enabled": false,
+      "family": "scoresway",
+      "competition_url": "https://www.scoresway.com/en_GB/soccer/england/championship/fixtures",
+      "metadata_path": "prueba lucas/config/metadata.xlsx",
+      "season_start_month": 202408,
+      "fixtures_path": "data/pipeline/scoresway_championship/fixtures.csv",
+      "matches_dir": "data/pipeline/scoresway_championship/matches",
+      "parsed_output_dir": "data/pipeline/scoresway_championship/matches/output",
+      "state_path": "data/pipeline/scoresway_championship/state.csv"
+    }
+  }
+}

@@ -75,3 +75,10 @@ data/
 nohup.out
 *.log
 data/Individuals - Training.xlsx
+
+# Legacy scraping local artifacts
+prueba lucas/.DS_Store
+prueba lucas/whoscored/
+prueba lucas/fixtures/
+prueba lucas/*.csv
+prueba lucas/*.xlsx
