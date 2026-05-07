@@ -4,19 +4,288 @@ from datetime import datetime
 import os
 import tempfile
 import textwrap
-import plotly.io as pio
 import numpy as np  # ← AÑADIR ESTA LÍNEA
 import plotly.graph_objects as go  # ← AÑADIR ESTA LÍNEA
 from PIL import Image
 
 
 def _write_plotly_png(fig, output_path: str, width: int, height: int, scale: float = 1.0) -> None:
-    """Fast and compatible Plotly-to-PNG export helper."""
-    try:
-        pio.write_image(fig, output_path, width=int(width), height=int(height), scale=scale, engine="kaleido")
-    except TypeError:
-        # Older kaleido/plotly stacks may not accept the engine kwarg.
-        pio.write_image(fig, output_path, width=int(width), height=int(height), scale=scale)
+    """Render the report's Plotly figures to PNG with Matplotlib."""
+    os.environ.setdefault("MPLCONFIGDIR", tempfile.gettempdir())
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
+    fig_dict = fig.to_dict() if hasattr(fig, "to_dict") else {}
+    traces = fig_dict.get("data", [])
+    layout = fig_dict.get("layout", {})
+    if not traces:
+        raise RuntimeError("Figure has no traces to render")
+
+    dpi = 100
+    mpl_width = max(1.0, (float(width) * float(scale)) / dpi)
+    mpl_height = max(1.0, (float(height) * float(scale)) / dpi)
+    mpl_fig, ax = plt.subplots(figsize=(mpl_width, mpl_height), dpi=dpi)
+    mpl_fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+
+    def _as_list(value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        try:
+            return list(value)
+        except TypeError:
+            return [value]
+
+    def _layout_text(value):
+        if isinstance(value, dict):
+            return value.get("text", "")
+        return value or ""
+
+    def _line_style(line):
+        line = line or {}
+        dash = line.get("dash", "solid")
+        if dash in {"dash", "longdash"}:
+            linestyle = "--"
+        elif dash == "dot":
+            linestyle = ":"
+        elif dash == "dashdot":
+            linestyle = "-."
+        else:
+            linestyle = "-"
+        return {
+            "color": line.get("color", "#2f3a45"),
+            "linewidth": float(line.get("width", 1.8) or 1.8),
+            "linestyle": linestyle,
+        }
+
+    def _marker_colors(marker, count, default="#fcec03"):
+        marker = marker or {}
+        colors = marker.get("color")
+        if colors is None:
+            colors = default
+        if isinstance(colors, str):
+            return [colors] * count
+        colors = _as_list(colors)
+        if not colors:
+            colors = [default]
+        return (colors * count)[:count]
+
+    def _is_date_like(values):
+        if not values:
+            return False
+        if any(isinstance(value, (datetime, pd.Timestamp, np.datetime64)) for value in values):
+            return True
+        import re
+        import warnings
+
+        string_values = [str(value).strip() for value in values if value is not None and str(value).strip()]
+        if not string_values:
+            return False
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$|^\d{1,2}/\d{1,2}/\d{2,4}$")
+        if sum(bool(date_pattern.match(value)) for value in string_values) / len(string_values) < 0.75:
+            return False
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            converted = pd.to_datetime(pd.Series(string_values), errors="coerce")
+        return converted.notna().mean() >= 0.75
+
+    all_x_values = []
+    all_y_values = []
+    for trace in traces:
+        all_x_values.extend(_as_list(trace.get("x")))
+        all_y_values.extend(_as_list(trace.get("y")))
+
+    x_is_date = _is_date_like(all_x_values)
+    x_is_numeric = bool(all_x_values) and pd.to_numeric(pd.Series(all_x_values), errors="coerce").notna().mean() >= 0.75
+    y_is_numeric = bool(all_y_values) and pd.to_numeric(pd.Series(all_y_values), errors="coerce").notna().mean() >= 0.75
+
+    x_categories = []
+    y_categories = []
+    if not x_is_date and not x_is_numeric:
+        for value in all_x_values:
+            value = str(value)
+            if value not in x_categories:
+                x_categories.append(value)
+    if not y_is_numeric:
+        for value in all_y_values:
+            value = str(value)
+            if value not in y_categories:
+                y_categories.append(value)
+
+    def _convert_x(values):
+        if x_is_date:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                return np.array(pd.to_datetime(pd.Series(values), errors="coerce").dt.to_pydatetime())
+        if x_is_numeric:
+            return pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=float)
+        return np.array([x_categories.index(str(value)) if str(value) in x_categories else np.nan for value in values], dtype=float)
+
+    def _convert_y(values):
+        if y_is_numeric:
+            return pd.to_numeric(pd.Series(values), errors="coerce").to_numpy(dtype=float)
+        return np.array([y_categories.index(str(value)) if str(value) in y_categories else np.nan for value in values], dtype=float)
+
+    bar_traces = [trace for trace in traces if trace.get("type", "bar") == "bar"]
+    bar_count = len(bar_traces)
+    barmode = layout.get("barmode", "group")
+    bar_slot_width = 0.72
+    plotted = False
+
+    for bar_index, trace in enumerate(bar_traces):
+        x_values = _as_list(trace.get("x"))
+        y_values = _convert_y(_as_list(trace.get("y")))
+        if not x_values or len(y_values) == 0 or np.isnan(y_values).all():
+            continue
+        x_positions = _convert_x(x_values)
+        colors = _marker_colors(trace.get("marker"), len(x_values))
+
+        if barmode == "group" and bar_count > 1 and not x_is_date and not x_is_numeric:
+            single_width = bar_slot_width / max(bar_count, 1)
+            offset = (bar_index - ((bar_count - 1) / 2.0)) * single_width
+            x_positions = x_positions + offset
+            bar_width = single_width * 0.92
+        else:
+            bar_width = 0.65 if (x_is_date or x_is_numeric) else bar_slot_width
+
+        ax.bar(
+            x_positions,
+            y_values,
+            color=colors[: len(x_values)],
+            width=bar_width,
+            label=trace.get("name"),
+            alpha=0.95,
+        )
+
+        text_values = _as_list(trace.get("text"))
+        if text_values:
+            for x_pos, y_pos, label in zip(x_positions, y_values, text_values):
+                if pd.notna(y_pos):
+                    ax.text(x_pos, y_pos, str(label), ha="center", va="bottom", fontsize=7)
+        plotted = True
+
+    for trace in traces:
+        trace_type = trace.get("type", "scatter")
+        if trace_type not in {"scatter", "scattergl"}:
+            continue
+        x_raw = _as_list(trace.get("x"))
+        y_raw = _as_list(trace.get("y"))
+        if not x_raw or not y_raw:
+            continue
+        x_values = _convert_x(x_raw)
+        y_values = _convert_y(y_raw)
+        if len(x_values) == 0 or len(y_values) == 0:
+            continue
+
+        mode = trace.get("mode", "lines+markers")
+        marker = trace.get("marker") or {}
+        line = trace.get("line") or {}
+        color = line.get("color") or marker.get("color") or "#2f3a45"
+        if not isinstance(color, str):
+            try:
+                color = list(color)[0]
+            except TypeError:
+                color = "#2f3a45"
+
+        if "lines" in mode:
+            ax.plot(x_values, y_values, label=trace.get("name"), **_line_style({**line, "color": color}))
+        if "markers" in mode:
+            colors = _marker_colors(marker, len(y_values), default=color)
+            ax.scatter(
+                x_values,
+                y_values,
+                c=colors,
+                s=float(marker.get("size", 55) or 55),
+                label=trace.get("name") if "lines" not in mode else None,
+                edgecolors="#2f3a45",
+                linewidths=0.35,
+                alpha=0.92,
+            )
+        plotted = True
+
+    if not plotted:
+        raise RuntimeError("Figure has no plottable data")
+
+    title = _layout_text(layout.get("title", ""))
+    if title:
+        ax.set_title(str(title), fontsize=11, fontweight="bold", pad=10)
+
+    xaxis = layout.get("xaxis", {}) if isinstance(layout.get("xaxis", {}), dict) else {}
+    yaxis = layout.get("yaxis", {}) if isinstance(layout.get("yaxis", {}), dict) else {}
+    x_title = _layout_text(xaxis.get("title", ""))
+    y_title = _layout_text(yaxis.get("title", ""))
+    ax.set_xlabel(str(x_title or ""), fontsize=8)
+    ax.set_ylabel(str(y_title or ""), fontsize=8)
+
+    if x_categories:
+        tick_angle = xaxis.get("tickangle", -35)
+        try:
+            tick_angle = float(tick_angle)
+        except (TypeError, ValueError):
+            tick_angle = -35
+        ax.set_xticks(range(len(x_categories)))
+        ax.set_xticklabels(x_categories, rotation=abs(tick_angle), ha="right", fontsize=7)
+    elif x_is_date:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m/%Y"))
+        mpl_fig.autofmt_xdate(rotation=30, ha="right")
+
+    if y_categories:
+        ax.set_yticks(range(len(y_categories)))
+        ax.set_yticklabels(y_categories, fontsize=8)
+
+    y_range = yaxis.get("range")
+    if isinstance(y_range, (list, tuple)) and len(y_range) == 2:
+        try:
+            ax.set_ylim(float(y_range[0]), float(y_range[1]))
+        except (TypeError, ValueError):
+            pass
+
+    for shape in layout.get("shapes", []) or []:
+        if shape.get("type") == "line" and shape.get("y0") == shape.get("y1"):
+            try:
+                ax.axhline(float(shape.get("y0")), **_line_style(shape.get("line")))
+            except (TypeError, ValueError):
+                pass
+
+    for annotation in layout.get("annotations", []) or []:
+        text = annotation.get("text")
+        y_value = annotation.get("y")
+        if text and y_value is not None:
+            try:
+                ax.text(
+                    0.98,
+                    float(y_value),
+                    str(text),
+                    transform=ax.get_yaxis_transform(),
+                    ha="right",
+                    va="bottom",
+                    fontsize=7,
+                    color=annotation.get("font", {}).get("color", "red") if isinstance(annotation.get("font"), dict) else "red",
+                )
+            except (TypeError, ValueError):
+                pass
+
+    showlegend = bool(layout.get("showlegend", True))
+    handles, labels = ax.get_legend_handles_labels()
+    labels = [label for label in labels if label and not str(label).startswith("_")]
+    if showlegend and labels:
+        ax.legend(fontsize=7, loc="upper right", frameon=False, ncol=min(len(labels), 3))
+
+    ax.grid(axis="y", color="#d9d9d9", linewidth=0.6, alpha=0.8)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="y", labelsize=7)
+    mpl_fig.tight_layout()
+    mpl_fig.savefig(output_path, format="png", dpi=dpi)
+    plt.close(mpl_fig)
 
 
 def _draw_image_fit_box(
@@ -1775,7 +2044,6 @@ def generate_individual_development_report_landscape(
     from datetime import datetime
     import os
     import tempfile
-    import plotly.io as pio
     import plotly.graph_objects as go
     
     class IndividualDevelopmentLandscape(FPDF):
@@ -2239,7 +2507,6 @@ def generate_individual_development_report_landscape(
             temp_timeline.close()
             try:
                 # ===== REDUCIR ALTURA PARA EVITAR DEFORMACIÓN =====
-                # pio.write_image(fig_timeline, temp_timeline.name, width=1200, height=350)  # ← AJUSTADO
                 # ✅ MAYOR RESOLUCIÓN PARA MEJOR CALIDAD
                 _write_plotly_png(fig_timeline, temp_timeline_path, width=1200, height=380, scale=2.0)
                 fig_timeline_path = temp_timeline_path
