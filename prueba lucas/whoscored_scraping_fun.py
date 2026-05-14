@@ -175,6 +175,21 @@ def optional_click(driver, locators, timeout=10):
             continue
     return None
 
+
+def optional_text(driver, locators, timeout=10):
+    """Return text from the first locator that resolves, else None."""
+    for locator in locators:
+        try:
+            element = WebDriverWait(driver, timeout).until(
+                EC.presence_of_element_located(locator)
+            )
+            text = element.text.strip()
+            if text:
+                return text
+        except Exception:
+            continue
+    return None
+
 def close_ad_popup(driver):
     try:
         # Esperar hasta 10 segundos para que aparezca la publicidad
@@ -314,54 +329,60 @@ def scrape_fixtures(fixtures_url, mes_ini=200001):
         close_ad_popup(driver)
 
         # --- Retrocedemos hasta el inicio del calendario usando el botón "previo" ---
-        span_locator = (By.CSS_SELECTOR, "span.toggleDatePicker, [class*='toggleDatePicker']")
+        span_locators = [
+            (By.CSS_SELECTOR, "span.toggleDatePicker"),
+            (By.CSS_SELECTOR, "[class*='toggleDatePicker']"),
+            (By.CSS_SELECTOR, "[class*='Calendar-module_header']"),
+        ]
         prev_button_locator = (By.ID, "dayChangeBtn-prev")
         optional_click(
             driver,
             [
-                span_locator,
+                *span_locators,
                 (By.CSS_SELECTOR, "[class*='toggleDatePicker']"),
                 (By.CSS_SELECTOR, "[class*='Calendar-module_dayChangeBtn']"),
             ],
             timeout=20,
         )
         # Obtenemos el texto actual del span (mes actual)
-        current_month = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located(span_locator)
-        ).text
-        print("Mes actual (inicio antes de retroceder):", current_month)
+        current_month = optional_text(driver, span_locators, timeout=10)
+        if current_month:
+            print("Mes actual (inicio antes de retroceder):", current_month)
+        else:
+            print("No se pudo leer el encabezado del calendario; continuamos con la vista actual.")
 
         # Hacemos clic en el botón "previo" hasta que el mes ya no cambie
-        while True:
-            try:
-                dismiss_blocking_overlays(driver)
-                safe_click(driver, prev_button_locator, timeout=15)
-                time.sleep(2)  # Pequeña espera para la animación
-            except Exception as e:
-                print("Error al hacer clic en el botón 'previo':", e)
-                break
+        if current_month:
+            while True:
+                try:
+                    dismiss_blocking_overlays(driver)
+                    safe_click(driver, prev_button_locator, timeout=15)
+                    time.sleep(2)  # Pequeña espera para la animación
+                except Exception as e:
+                    print("Error al hacer clic en el botón 'previo':", e)
+                    break
 
-            new_month = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located(span_locator)
-            ).text
-            new_month_ini = "{} {} {}".format(1,
-                                              new_month.split(" ")[-2].strip(),
-                                              new_month.split(" ")[-1].strip())
-            print("Nuevo mes tras clic en 'previo':", new_month)
-            if new_month == current_month or datetime.strptime(new_month_ini, "%d %b %Y") <= inicio:
-                print("Ya no se puede retroceder más. Se alcanzó el inicio del calendario.")
-                break
-            else:
-                current_month = new_month
+                new_month = optional_text(driver, span_locators, timeout=10)
+                if not new_month:
+                    print("No se pudo leer el nuevo encabezado del calendario tras retroceder.")
+                    break
+                new_month_ini = "{} {} {}".format(1,
+                                                  new_month.split(" ")[-2].strip(),
+                                                  new_month.split(" ")[-1].strip())
+                print("Nuevo mes tras clic en 'previo':", new_month)
+                if new_month == current_month or datetime.strptime(new_month_ini, "%d %b %Y") <= inicio:
+                    print("Ya no se puede retroceder más. Se alcanzó el inicio del calendario.")
+                    break
+                else:
+                    current_month = new_month
 
         # --- Ahora avanzamos mes a mes usando el botón "next" ---
         month_index = 1  # para el mensaje de procesamiento
         next_button_locator = (By.ID, "dayChangeBtn-next")
         # Obtenemos el mes actual (después de haber retrocedido)
-        current_month = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located(span_locator)
-        ).text
-        print("Mes de inicio para avanzar:", current_month)
+        current_month = optional_text(driver, span_locators, timeout=10)
+        if current_month:
+            print("Mes de inicio para avanzar:", current_month)
 
         while True:
             print(f"Intentando procesar el mes {month_index}")
@@ -390,11 +411,12 @@ def scrape_fixtures(fixtures_url, mes_ini=200001):
 
             # Esperamos a que el span del mes se actualice y lo obtenemos
             try:
-                new_month = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located(span_locator)
-                ).text
+                new_month = optional_text(driver, span_locators, timeout=10)
             except Exception as e:
                 print("Error al obtener el nuevo mes:", e)
+                break
+            if not new_month:
+                print("No se pudo leer el encabezado tras avanzar; detenemos la iteración.")
                 break
             #new_month_ini = new_month.split(" - ")[-1].strip()
             # Si el mes no cambia, se termina el bucle
