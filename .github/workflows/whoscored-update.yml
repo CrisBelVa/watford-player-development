@@ -1,0 +1,91 @@
+name: WhoScored Weekly Update
+
+on:
+  schedule:
+    - cron: "0 3 * * 2"
+    - cron: "0 4 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  update-whoscored:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TZ: Europe/Madrid
+      HEADLESS: "1"
+      PYTHON_BIN: python
+      SOURCE_NAME: whoscored_championship
+      RUN_MODE: incremental
+      CLEANUP_TEMP: "1"
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Madrid schedule window
+        id: madrid_gate
+        shell: bash
+        run: |
+          madrid_hour="$(TZ=Europe/Madrid date +%H)"
+          madrid_weekday="$(TZ=Europe/Madrid date +%u)"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "run_pipeline=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$madrid_weekday" == "2" && "$madrid_hour" == "05" ]]; then
+            echo "run_pipeline=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_pipeline=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping run outside Tuesday 05:00 Europe/Madrid window."
+          fi
+
+      - name: Set up Python
+        if: steps.madrid_gate.outputs.run_pipeline == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install Chrome
+        if: steps.madrid_gate.outputs.run_pipeline == 'true'
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install dependencies
+        if: steps.madrid_gate.outputs.run_pipeline == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate required secrets
+        if: steps.madrid_gate.outputs.run_pipeline == 'true'
+        shell: bash
+        run: |
+          missing=0
+          for key in DB_USER DB_PASSWORD DB_HOST DB_PORT DB_NAME; do
+            if [[ -z "${!key:-}" ]]; then
+              echo "Missing required secret: $key" >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            exit 1
+          fi
+
+      - name: Run WhoScored pipeline
+        if: steps.madrid_gate.outputs.run_pipeline == 'true'
+        run: ./scripts/run_pipeline_server.sh
+
+      - name: Upload pipeline status
+        if: always() && steps.madrid_gate.outputs.run_pipeline == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: whoscored-pipeline-status
+          path: |
+            data/pipeline/server_pipeline_status.txt
+            data/pipeline/server_pipeline.log

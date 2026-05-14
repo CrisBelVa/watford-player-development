@@ -13,5 +13,9 @@ fpdf2
 pdfkit
 wkhtmltopdf
 openpyxl
+requests
+beautifulsoup4
+selenium
+webdriver-manager
 gspread
 google-auth
