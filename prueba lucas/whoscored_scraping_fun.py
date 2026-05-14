@@ -165,6 +165,16 @@ def safe_click(driver, locator, timeout=10):
         driver.execute_script("arguments[0].click();", element)
         return element
 
+
+def optional_click(driver, locators, timeout=10):
+    """Try several locators and continue if none works."""
+    for locator in locators:
+        try:
+            return safe_click(driver, locator, timeout=timeout)
+        except Exception:
+            continue
+    return None
+
 def close_ad_popup(driver):
     try:
         # Esperar hasta 10 segundos para que aparezca la publicidad
@@ -304,10 +314,17 @@ def scrape_fixtures(fixtures_url, mes_ini=200001):
         close_ad_popup(driver)
 
         # --- Retrocedemos hasta el inicio del calendario usando el botón "previo" ---
-        span_locator = (By.CSS_SELECTOR, "span.toggleDatePicker")
+        span_locator = (By.CSS_SELECTOR, "span.toggleDatePicker, [class*='toggleDatePicker']")
         prev_button_locator = (By.ID, "dayChangeBtn-prev")
-        cookies_but=(By.CLASS_NAME, "Calendar-module_dayChangeBtn__sEvC8")
-        safe_click(driver, cookies_but, timeout=20)
+        optional_click(
+            driver,
+            [
+                span_locator,
+                (By.CSS_SELECTOR, "[class*='toggleDatePicker']"),
+                (By.CSS_SELECTOR, "[class*='Calendar-module_dayChangeBtn']"),
+            ],
+            timeout=20,
+        )
         # Obtenemos el texto actual del span (mes actual)
         current_month = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located(span_locator)
