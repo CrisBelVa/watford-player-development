@@ -77,11 +77,13 @@ data/
 nohup.out
 *.log
 data/Individuals - Training.xlsx
-<<<<<<< HEAD
-
-# O si quieres ser específico:
 filtered_df_lucas*.xlsx
 teams_info_lucas.xlsx
 data/watford_players_login_info.xlsx
-=======
->>>>>>> d0d0a31cd7b576da4811e6b7c39876e56c3d9035
+
+# Legacy scraping local artifacts
+prueba lucas/.DS_Store
+prueba lucas/whoscored/
+prueba lucas/fixtures/
+prueba lucas/*.csv
+prueba lucas/*.xlsx

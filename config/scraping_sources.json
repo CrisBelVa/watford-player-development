@@ -1,0 +1,15 @@
+{
+  "default_source": "whoscored_championship",
+  "sources": {
+    "whoscored_championship": {
+      "enabled": true,
+      "family": "whoscored",
+      "fixtures_url": "https://1xbet.whoscored.com/regions/252/tournaments/7/england-championship",
+      "season_start_month": 202508,
+      "fixtures_path": "data/pipeline/whoscored_championship/fixtures.csv",
+      "matches_dir": "data/pipeline/whoscored_championship/matches",
+      "parsed_output_dir": "data/pipeline/whoscored_championship/matches/output",
+      "state_path": "data/pipeline/whoscored_championship/state.csv"
+    }
+  }
+}
