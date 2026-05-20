@@ -89,3 +89,5 @@ jobs:
           path: |
             data/pipeline/server_pipeline_status.txt
             data/pipeline/server_pipeline.log
+            data/pipeline/debug/whoscored_fixtures_last_page.html
+            data/pipeline/debug/whoscored_fixtures_last_page.png

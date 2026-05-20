@@ -232,7 +232,8 @@ def extract_matches_from_html(html_content, fixtures_url):
     soup = BeautifulSoup(html_content, 'html.parser')
     matches = []
     
-    date_accordions = soup.find_all('div', class_='Accordion-module_accordion__UuHD0')
+    date_accordions = soup.select("div[class*='Accordion-module_accordion']")
+    fallback_matches = soup.select("div[class*='Match-module_match']")
     
     from urllib.parse import urlparse
 
@@ -264,54 +265,70 @@ def extract_matches_from_html(html_content, fixtures_url):
         # print("La URL no tiene el formato esperado.")
         pass
 
+    def append_match(match, date_value):
+        try:
+            time_or_status_el = match.find(
+                'span',
+                class_=re.compile(r"Match-module_(startTime|FT)")
+            )
+            time_or_status = time_or_status_el.text.strip() if time_or_status_el else "N/A"
+            
+            teams = match.find_all('a', class_=re.compile(r"Match-module_teamNameText"))
+            home_team = teams[0].text.strip() if teams else "N/A"
+            away_team = teams[1].text.strip() if len(teams) > 1 else "N/A"
+            
+            score_elements = match.find_all('a', id=re.compile('^scoresBtn-'))
+            if not score_elements:
+                return
+            score_element = score_elements[0]
+            match_id = score_element['id'].split('-')[1]
+            
+            scores = score_element.find_all('span') if score_element else []
+            home_score = scores[0].text.strip() if scores else "N/A"
+            away_score = scores[1].text.strip() if len(scores) > 1 else "N/A"
+            
+            odds = match.find_all('span', class_=re.compile(r"OddsButton-module_oddsText"))
+            home_odds = odds[0].text.strip() if odds else "N/A"
+            draw_odds = odds[1].text.strip() if len(odds) > 1 else "N/A"
+            away_odds = odds[2].text.strip() if len(odds) > 2 else "N/A"
+            
+            matches.append({
+                'region': region,
+                'tournament':tournament,
+                'season':season,
+                'stage':stage,
+                'competition':competition,
+                'date': date_value,
+                'time_or_status': time_or_status,
+                'home_team': home_team,
+                'away_team': away_team,
+                'match_id': match_id,
+                'home_score': home_score,
+                'away_score': away_score,
+                'home_odds': home_odds,
+                'draw_odds': draw_odds,
+                'away_odds': away_odds
+            })
+        except Exception as e:
+            print(f"Error procesando un partido: {str(e)}")
+
     for accordion in date_accordions:
-        date = accordion.find('div', class_='Accordion-module_header__HqzWD').text.strip()
-        match_divs = accordion.find_all('div', class_='Match-module_match__XlKTY')
+        header = accordion.find('div', class_=re.compile(r"Accordion-module_header"))
+        date = header.text.strip() if header else "N/A"
+        match_divs = accordion.select("div[class*='Match-module_match']")
         print("Match:", match_divs)
         for match in match_divs:
+            append_match(match, date)
+
+    if not matches and fallback_matches:
+        print("No se encontraron acordeones; usando fallback de partidos visibles.")
+        for match in fallback_matches:
             try:
-                time_or_status = match.find('span', class_=['Match-module_startTime__c49c8', 'Match-module_FT__2rmH7'])
-                time_or_status = time_or_status.text.strip() if time_or_status else "N/A"
-                
-                teams = match.find_all('a', class_='Match-module_teamNameText__Dqv-G')
-                home_team = teams[0].text.strip() if teams else "N/A"
-                away_team = teams[1].text.strip() if len(teams) > 1 else "N/A"
-                
-                # score_element = match.find('a', class_='Match-module_score__5Ghhj')
-                # match_id = score_element['id'].split('-')[1] if score_element else "N/A"
-                score_elements = match.find_all('a', id=re.compile('^scoresBtn-'))
-                # Extraer el ID del partido del atributo id
-                score_element = score_elements[0]
-                match_id = score_element['id'].split('-')[1]
-                
-                scores = score_element.find_all('span') if score_element else []
-                home_score = scores[0].text.strip() if scores else "N/A"
-                away_score = scores[1].text.strip() if len(scores) > 1 else "N/A"
-                
-                odds = match.find_all('span', class_='OddsButton-module_oddsText__WD5Dv')
-                home_odds = odds[0].text.strip() if odds else "N/A"
-                draw_odds = odds[1].text.strip() if len(odds) > 1 else "N/A"
-                away_odds = odds[2].text.strip() if len(odds) > 2 else "N/A"
-                
-                matches.append({
-                    'region': region,
-                    'tournament':tournament,
-                    'season':season,
-                    'stage':stage,
-                    'competition':competition,
-                    'date': date,
-                    'time_or_status': time_or_status,
-                    'home_team': home_team,
-                    'away_team': away_team,
-                    'match_id': match_id,
-                    'home_score': home_score,
-                    'away_score': away_score,
-                    'home_odds': home_odds,
-                    'draw_odds': draw_odds,
-                    'away_odds': away_odds
-                })
-            except Exception as e:
-                print(f"Error procesando un partido: {str(e)}")
+                header = match.find_previous('div', class_=re.compile(r"Accordion-module_header"))
+                date = header.text.strip() if header else "N/A"
+            except Exception:
+                date = "N/A"
+            append_match(match, date)
     
     return pd.DataFrame(matches)
 
@@ -431,6 +448,17 @@ def scrape_fixtures(fixtures_url, mes_ini=200001):
     except Exception as e:
         print(f"Se produjo un error general: {str(e)}")
     finally:
+        debug_dir = os.path.join(os.getcwd(), "data", "pipeline", "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        try:
+            with open(os.path.join(debug_dir, "whoscored_fixtures_last_page.html"), "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+        except Exception as debug_html_error:
+            print(f"No se pudo guardar HTML de depuración: {debug_html_error}")
+        try:
+            driver.save_screenshot(os.path.join(debug_dir, "whoscored_fixtures_last_page.png"))
+        except Exception as debug_png_error:
+            print(f"No se pudo guardar captura de depuración: {debug_png_error}")
         driver.quit()
 
     if all_matches_df.empty:
